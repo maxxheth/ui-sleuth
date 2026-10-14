@@ -162,6 +162,10 @@ def infer_pattern_name(el: HtmlElement, tag_signature: str) -> str:
         return "TestimonialCard"
     if any(k in cls_text for k in ["pricing", "plan", "tier", "subscription"]):
         return "PricingPlanCard"
+    if any(k in cls_text for k in ["sm-menu", "menu-card", "nav-card"]):
+        return "NavMenuCard"
+    if any(k in cls_text for k in ["menu-item", "nav-item", "toc-item"]):
+        return "NavMenuItem"
     if any(k in cls_text for k in ["product", "item", "catalog", "shop"]):
         return "ProductCard"
     if any(k in cls_text for k in ["feature", "benefit", "service", "capability"]):
@@ -188,7 +192,10 @@ def extract_sample_content(el: HtmlElement) -> dict[str, Any]:
     sample: dict[str, Any] = {}
 
     # Heading / title
-    headings = el.xpath(".//h1 | .//h2 | .//h3 | .//h4 | .//h5 | .//h6 | .//strong")
+    headings = el.xpath(
+        ".//h1 | .//h2 | .//h3 | .//h4 | .//h5 | .//h6 | .//strong"
+        " | .//*[contains(@class, 'heading') or contains(@class, 'title') or contains(@class, 'menu-link-item')]"
+    )
     if headings and isinstance(headings, list):
         title_el = headings[0]
         if isinstance(title_el, HtmlElement):
@@ -197,7 +204,7 @@ def extract_sample_content(el: HtmlElement) -> dict[str, Any]:
                 sample["title"] = title_text[:60]
 
     # Description / snippet
-    paragraphs = el.xpath(".//p | .//span")
+    paragraphs = el.xpath(".//p | .//span | .//*[contains(@class, 'txt')]")
     if paragraphs and isinstance(paragraphs, list):
         for p in paragraphs:
             if isinstance(p, HtmlElement):
@@ -217,6 +224,10 @@ def extract_sample_content(el: HtmlElement) -> dict[str, Any]:
             action_text = re.sub(r"\s+", " ", action_el.text_content()).strip()
             if action_text and len(action_text) <= 30:
                 sample["action"] = action_text
+    elif el.tag.lower() in {"a", "button"}:
+        self_text = re.sub(r"\s+", " ", el.text_content()).strip()
+        if self_text and len(self_text) <= 40:
+            sample["action"] = self_text
 
     # Image
     images = el.xpath(".//img")
@@ -429,6 +440,39 @@ def prune_and_map_dom(html_content: str) -> list[SectionBlueprint]:
                 visited_nodes.add(node)
                 tag_name = node.tag.lower() if isinstance(node.tag, str) else "section"
                 landmarks.append(parse_landmark_node(node, tag_name))
+
+    # Supplement missing header / nav landmarks if site uses div.header or div.nav (e.g. Webflow)
+    existing_roles = {lm.landmark for lm in landmarks}
+    supplemental_header_nav: list[SectionBlueprint] = []
+    if "header" not in existing_roles:
+        header_divs = root.xpath(
+            ".//div[@id='header' or @role='banner' or contains(concat(' ', normalize-space(@class), ' '), ' header ') or contains(concat(' ', normalize-space(@class), ' '), ' header-top ')]"
+        )
+        if isinstance(header_divs, list):
+            for h_div in header_divs:
+                if isinstance(h_div, HtmlElement) and h_div not in visited_nodes:
+                    # Skip if nested inside another header candidate already visited
+                    if any(p in visited_nodes for p in h_div.iterancestors()):
+                        continue
+                    visited_nodes.add(h_div)
+                    supplemental_header_nav.append(parse_landmark_node(h_div, "header"))
+                    break
+
+    if "nav" not in existing_roles:
+        nav_divs = root.xpath(
+            ".//div[@id='nav' or @role='navigation' or contains(concat(' ', normalize-space(@class), ' '), ' nav ')]"
+        )
+        if isinstance(nav_divs, list):
+            for n_div in nav_divs:
+                if isinstance(n_div, HtmlElement) and n_div not in visited_nodes:
+                    if any(p in visited_nodes for p in n_div.iterancestors()):
+                        continue
+                    visited_nodes.add(n_div)
+                    supplemental_header_nav.append(parse_landmark_node(n_div, "nav"))
+                    break
+
+    if supplemental_header_nav:
+        landmarks = supplemental_header_nav + landmarks
 
     # If no standard HTML5 landmarks were found (e.g. older legacy site), look for divs
     if not landmarks:

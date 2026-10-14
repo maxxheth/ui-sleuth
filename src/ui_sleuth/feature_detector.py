@@ -159,21 +159,30 @@ PROBE_SOPHISTICATED_FEATURES_JS = """
             // check if translated outside normal bounds
             rect.top > viewportHeight * 2 || rect.left > viewportWidth || rect.right < 0 || rect.bottom < -100
         );
-        const isLargeModal = (rect.height > 500 || el.scrollHeight > 500) && (
+        const clsStr = (el.className && typeof el.className === 'string') ? el.className : '';
+        const hasOverlayClass = (
+            clsStr.includes('modal') ||
+            clsStr.includes('drawer') ||
+            clsStr.includes('news') ||
+            clsStr.includes('popup') ||
+            clsStr.includes('pop-') ||
+            /\b(nav|menu-overlay)\b/.test(clsStr)
+        );
+        const isHiddenMenuOverlay = (
+            (style.position === 'fixed' || style.position === 'absolute') &&
+            (style.display === 'none' || style.visibility === 'hidden' || parseFloat(style.opacity || '1') === 0) &&
+            hasOverlayClass &&
+            el.querySelectorAll('a, button, [class*="menu"], [class*="item"]').length >= 4
+        );
+        const isLargeModal = ((rect.height > 500 || el.scrollHeight > 500) && (
             style.position === 'fixed' || style.position === 'absolute'
         ) && (
             style.display === 'none' ||
             style.visibility === 'hidden' ||
             parseFloat(style.opacity || '1') === 0 ||
             isOffscreenTransform ||
-            (el.className && typeof el.className === 'string' && (
-                el.className.includes('modal') ||
-                el.className.includes('drawer') ||
-                el.className.includes('news') ||
-                el.className.includes('popup') ||
-                el.className.includes('pop-')
-            ))
-        );
+            hasOverlayClass
+        )) || isHiddenMenuOverlay;
 
         if (isLargeModal) {
             const selector = makeElementSelector(el);
@@ -181,11 +190,11 @@ PROBE_SOPHISTICATED_FEATURES_JS = """
 
             if (!seenDrawers.has(dedupeKey) && selector !== 'body' && selector !== 'html') {
                 seenDrawers.add(dedupeKey);
-                const headings = Array.from(el.querySelectorAll('h1, h2, h3, [class*="title"]'))
-                    .map(h => (h.innerText || '').trim())
+                const headings = Array.from(el.querySelectorAll('h1, h2, h3, [class*="title"], [class*="menu-link-item"]'))
+                    .map(h => (h.innerText || h.textContent || '').trim().replace(/\\s+/g, ' '))
                     .filter(t => t.length > 0)
-                    .slice(0, 5);
-                const textPreview = (el.innerText || '').trim().slice(0, 150).replace(/[\\r\\n]+/g, ' ');
+                    .slice(0, 8);
+                const textPreview = (el.innerText || el.textContent || '').trim().replace(/\\s+/g, ' ').slice(0, 150);
 
                 results.offscreen_drawers.push({
                     name: `Modal/Drawer (${selector})`,
@@ -193,12 +202,12 @@ PROBE_SOPHISTICATED_FEATURES_JS = """
                     dimensions: {
                         top: Math.round(rect.top + window.scrollY),
                         left: Math.round(rect.left),
-                        width: Math.round(rect.width || el.scrollWidth),
-                        height: Math.round(rect.height || el.scrollHeight)
+                        width: Math.round(rect.width || el.scrollWidth || viewportWidth),
+                        height: Math.round(rect.height || el.scrollHeight || viewportHeight)
                     },
                     headings: headings,
                     textPreview: textPreview,
-                    description: `Off-screen or dynamic drawer/modal containing ${headings.length} headings and substantial structured content.`
+                    description: `Off-screen or dynamic drawer/modal containing ${headings.length} headings/items and substantial structured content.`
                 });
             }
         }

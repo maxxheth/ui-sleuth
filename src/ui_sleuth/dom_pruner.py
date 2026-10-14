@@ -360,11 +360,23 @@ def parse_landmark_node(el: HtmlElement, landmark_role: str) -> SectionBlueprint
     patterns, layout = find_all_patterns_in_element(el)
 
     subsections: list[SectionBlueprint] = []
-    # Recursively check remaining children for nested structural landmarks
-    for child in list(el):
-        tag = child.tag.lower() if isinstance(child.tag, str) else ""
-        if tag in ["section", "article", "nav", "aside"]:
-            subsections.append(parse_landmark_node(child, tag))
+    # Discover direct sub-landmarks within this element in document order
+    for candidate in list(el.iter()):
+        if candidate is el or not isinstance(candidate.tag, str):
+            continue
+        c_tag = candidate.tag.lower()
+        if c_tag in LANDMARK_TAGS:
+            # Check if there is an intermediate landmark ancestor between candidate and el
+            p = candidate.getparent()
+            has_intermediate = False
+            while p is not None and p is not el:
+                p_tag = p.tag.lower() if isinstance(p.tag, str) else ""
+                if p_tag in LANDMARK_TAGS:
+                    has_intermediate = True
+                    break
+                p = p.getparent()
+            if not has_intermediate:
+                subsections.append(parse_landmark_node(candidate, c_tag))
 
     return SectionBlueprint(
         landmark=landmark_role,
@@ -395,11 +407,12 @@ def prune_and_map_dom(html_content: str) -> list[SectionBlueprint]:
     landmarks: list[SectionBlueprint] = []
     visited_nodes: set[HtmlElement] = set()
 
-    # Search for standard landmark tags in document order
-    for tag in LANDMARK_TAGS:
-        nodes = root.findall(f".//{tag}")
-        for node in nodes:
-            if node in visited_nodes:
+    # Search for standard landmark tags in exact document order
+    xpath_selector = ".//*[" + " or ".join(f"self::{t}" for t in LANDMARK_TAGS) + "]"
+    candidate_nodes = root.xpath(xpath_selector)
+    if isinstance(candidate_nodes, list):
+        for node in candidate_nodes:
+            if not isinstance(node, HtmlElement) or node in visited_nodes:
                 continue
 
             # Don't add nested landmarks at top level if already inside a parent landmark
@@ -414,7 +427,8 @@ def prune_and_map_dom(html_content: str) -> list[SectionBlueprint]:
 
             if not inside_landmark:
                 visited_nodes.add(node)
-                landmarks.append(parse_landmark_node(node, tag))
+                tag_name = node.tag.lower() if isinstance(node.tag, str) else "section"
+                landmarks.append(parse_landmark_node(node, tag_name))
 
     # If no standard HTML5 landmarks were found (e.g. older legacy site), look for divs
     if not landmarks:

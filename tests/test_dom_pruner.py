@@ -128,3 +128,40 @@ def test_tracking_pixel_and_script_stripping():
     assert len(landmarks) == 1
     assert landmarks[0].landmark == "main"
     assert "Clean Content" in landmarks[0].text_preview
+
+
+def test_nested_landmarks_in_wrapper_divs():
+    html_nested = """
+    <header id="hdr"><h1>Header</h1></header>
+    <main id="main-area">
+        <div class="outer-wrap">
+            <div class="inner-container">
+                <section id="nested-features">
+                    <h2>Features Section</h2>
+                    <div class="card-grid">
+                        <div class="card"><h3>Feature 1</h3><p>Desc 1</p></div>
+                        <div class="card"><h3>Feature 2</h3><p>Desc 2</p></div>
+                        <div class="card"><h3>Feature 3</h3><p>Desc 3</p></div>
+                    </div>
+                </section>
+                <section id="nested-pricing">
+                    <h2>Pricing Section</h2>
+                </section>
+            </div>
+        </div>
+    </main>
+    <footer id="ftr"><p>Footer</p></footer>
+    """
+    landmarks = prune_and_map_dom(html_nested)
+    assert [lm.landmark for lm in landmarks] == ["header", "main", "footer"]
+
+    main_lm = landmarks[1]
+    assert len(main_lm.subsections) == 2
+    sub_ids = [s.id for s in main_lm.subsections]
+    assert sub_ids == ["nested-features", "nested-pricing"]
+
+    # Verify pattern inside deeply nested section
+    features_sub = main_lm.subsections[0]
+    assert len(features_sub.detected_patterns) == 1
+    assert features_sub.detected_patterns[0].instance_count == 3
+    assert features_sub.detected_patterns[0].sample_content["title"] == "Feature 1"

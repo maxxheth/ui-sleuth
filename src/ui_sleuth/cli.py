@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Annotated
 
 import typer
+from dotenv import load_dotenv
 from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
@@ -15,6 +16,8 @@ from ui_sleuth.crawler import SiteCrawler
 from ui_sleuth.exporter import export_blueprint, export_site_design_system
 from ui_sleuth.proxy_manager import ProxyConfig, resolve_proxy_config
 from ui_sleuth.scrapling_engine import ScraplingEngine
+
+load_dotenv()
 
 app = typer.Typer(
     name="ui-sleuth",

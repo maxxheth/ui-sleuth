@@ -340,3 +340,8 @@ def test_cli_extract_crawl_option():
     assert res.exit_code == 0
     assert "--crawl" in res.stdout
     assert "--max-pages" in res.stdout
+
+
+def test_crawler_entry_url_canonicalization():
+    crawler = SiteCrawler("https://example.com")
+    assert crawler.entry_url == "https://example.com/"

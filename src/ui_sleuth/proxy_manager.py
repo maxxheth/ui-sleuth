@@ -9,7 +9,10 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
+from dotenv import load_dotenv
 from scrapling.engines.toolbelt.proxy_rotation import ProxyRotator
+
+load_dotenv()
 
 logger = logging.getLogger(__name__)
 
@@ -167,50 +170,47 @@ def resolve_proxy_config(
     if env_decodo_url:
         return ProxyConfig(single_proxy=env_decodo_url)
 
-    # 4. Decodo credentials in environment
-    decodo_user = os.getenv("DECODO_USERNAME")
-    decodo_pass = os.getenv("DECODO_PASSWORD")
-    if decodo_user and decodo_pass:
-        decodo_host = os.getenv("DECODO_HOST", DEFAULT_DECODO_HOST)
-        start_port_str = os.getenv("DECODO_PORT_START", "10001")
-        end_port_str = os.getenv("DECODO_PORT_END", "10010")
-        try:
-            start_port = int(start_port_str)
-            end_port = int(end_port_str)
-            pool = generate_decodo_pool(
-                username=decodo_user,
-                password=decodo_pass,
-                host=decodo_host,
-                start_port=start_port,
-                end_port=end_port,
-            )
-            return ProxyConfig(proxy_list=pool)
-        except ValueError:
-            single = build_decodo_url(decodo_user, decodo_pass, decodo_host)
-            return ProxyConfig(single_proxy=single)
+    # 4. Decodo credentials in environment (activated via --decodo)
+    if enable_decodo:
+        decodo_user = os.getenv("DECODO_USERNAME")
+        decodo_pass = os.getenv("DECODO_PASSWORD")
+        if decodo_user and decodo_pass:
+            decodo_host = os.getenv("DECODO_HOST", DEFAULT_DECODO_HOST)
+            start_port_str = os.getenv("DECODO_PORT_START", "10001")
+            end_port_str = os.getenv("DECODO_PORT_END", "10010")
+            try:
+                start_port = int(start_port_str)
+                end_port = int(end_port_str)
+                pool = generate_decodo_pool(
+                    username=decodo_user,
+                    password=decodo_pass,
+                    host=decodo_host,
+                    start_port=start_port,
+                    end_port=end_port,
+                )
+                return ProxyConfig(proxy_list=pool)
+            except ValueError:
+                single = build_decodo_url(decodo_user, decodo_pass, decodo_host)
+                return ProxyConfig(single_proxy=single)
 
-    # 5. Environment variable PROXY_FILE
+        decodo_file = os.getenv("DECODO_PROXY_FILE")
+        if decodo_file and Path(decodo_file).is_file():
+            proxies = load_proxies_from_file(decodo_file)
+            if proxies:
+                logger.info("Using Decodo proxies from %s", decodo_file)
+                return ProxyConfig(proxy_list=proxies)
     env_proxy_file = os.getenv("PROXY_FILE")
     if env_proxy_file:
         proxies = load_proxies_from_file(env_proxy_file)
         if proxies:
             return ProxyConfig(proxy_list=proxies)
 
-    # 6. Auto-detect proxies.txt in current directory or /var/www/upwork-scraper-fs if requested
+    # 6. Auto-detect proxies.txt in current directory if present
     cwd_proxy = Path.cwd() / "proxies.txt"
     if cwd_proxy.is_file():
         proxies = load_proxies_from_file(cwd_proxy)
         if proxies:
             return ProxyConfig(proxy_list=proxies)
-
-    # If enable_decodo is explicitly set, look for Decodo proxy definitions in upwork-scraper-fs
-    if enable_decodo:
-        sample_proxy_file = Path("/var/www/upwork-scraper-fs/proxies.txt")
-        if sample_proxy_file.is_file():
-            proxies = load_proxies_from_file(sample_proxy_file)
-            if proxies:
-                logger.info("Using Decodo proxies from %s", sample_proxy_file)
-                return ProxyConfig(proxy_list=proxies)
 
     # 7. Standard HTTP_PROXY / HTTPS_PROXY
     standard_proxy = os.getenv("HTTPS_PROXY") or os.getenv("HTTP_PROXY")

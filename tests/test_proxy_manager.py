@@ -69,3 +69,20 @@ def test_resolve_proxy_config(monkeypatch):
     cfg = resolve_proxy_config()
     assert cfg.has_proxy
     assert "envuser" in (cfg.single_proxy or "")
+
+
+def test_resolve_proxy_config_decodo_flag(monkeypatch):
+    monkeypatch.delenv("DECODO_PROXY_URL", raising=False)
+    monkeypatch.setenv("DECODO_USERNAME", "myuser")
+    monkeypatch.setenv("DECODO_PASSWORD", "mypass")
+    monkeypatch.setenv("DECODO_PORT_START", "10001")
+    monkeypatch.setenv("DECODO_PORT_END", "10003")
+
+    # Disabled by default
+    cfg_off = resolve_proxy_config(enable_decodo=False)
+    assert not cfg_off.has_proxy
+
+    # Enabled via flag
+    cfg_on = resolve_proxy_config(enable_decodo=True)
+    assert cfg_on.has_proxy
+    assert len(cfg_on.proxy_list) == 3

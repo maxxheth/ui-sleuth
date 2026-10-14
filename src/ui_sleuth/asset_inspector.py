@@ -19,6 +19,7 @@ logger = logging.getLogger(__name__)
 PATTERN_3D = re.compile(r"\.(gltf|glb|splinecode|usdz|fbx|bin|obj)($|\?)", re.IGNORECASE)
 PATTERN_MOTION = re.compile(r"\.(riv|lottie)($|\?)", re.IGNORECASE)
 PATTERN_VIDEO = re.compile(r"\.(mp4|webm|m3u8|mpd|mov)($|\?)", re.IGNORECASE)
+PATTERN_LOTTIE_JSON = re.compile(r"\.json($|\?)", re.IGNORECASE)
 
 # Client-side JavaScript evaluation for canvas and video diagnostics
 CANVAS_VIDEO_PROBE_JS = """
@@ -46,17 +47,19 @@ CANVAS_VIDEO_PROBE_JS = """
     const canvasList = [];
     const canvases = document.querySelectorAll('canvas');
     canvases.forEach((c, idx) => {
-        let contextType = 'unknown';
-        // Test context creation or existing context
-        try {
-            if (c.getContext('webgl2')) {
-                contextType = 'webgl2';
-            } else if (c.getContext('webgl') || c.getContext('experimental-webgl')) {
-                contextType = 'webgl';
-            } else if (c.getContext('2d')) {
-                contextType = '2d';
-            }
-        } catch (e) {}
+        let contextType = c.__sleuth_context_type__ || 'unknown';
+        // Test context creation or existing context safely
+        if (contextType === 'unknown') {
+            try {
+                if (c.getContext('2d')) {
+                    contextType = '2d';
+                } else if (c.getContext('webgl2')) {
+                    contextType = 'webgl2';
+                } else if (c.getContext('webgl') || c.getContext('experimental-webgl')) {
+                    contextType = 'webgl';
+                }
+            } catch (e) {}
+        }
 
         canvasList.push({
             index: idx,
@@ -155,7 +158,7 @@ class NetworkAssetCollector:
                 self.assets_motion.append(url)
                 logger.debug("Captured motion asset: %s", url)
             elif (
-                url.endswith(".json")
+                PATTERN_LOTTIE_JSON.search(url)
                 and ("lottie" in url.lower() or "bodymovin" in url.lower() or "anim" in url.lower())
                 and (url not in self.assets_motion)
             ):

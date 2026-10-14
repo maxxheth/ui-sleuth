@@ -30,6 +30,23 @@ PROBE_SOPHISTICATED_FEATURES_JS = """
     const viewportHeight = window.innerHeight || 900;
     const viewportWidth = window.innerWidth || 1440;
 
+    function makeElementSelector(el) {
+        if (!el || !el.tagName) return 'element';
+        const tag = el.tagName.toLowerCase();
+        if (el.id) return `${tag}#${el.id}`;
+        if (el.getAttribute && el.getAttribute('data-testid')) {
+            return `${tag}[data-testid="${el.getAttribute('data-testid')}"]`;
+        }
+        if (typeof el.className === 'string' && el.className.trim()) {
+            const classes = el.className.trim().split(/\\s+/)
+                .filter(c => c && !c.includes(':') && !c.includes('/') && !c.includes('[') && !c.includes('%') && !c.includes('.'));
+            if (classes.length > 0) {
+                return `${tag}.${classes.slice(0, 2).join('.')}`;
+            }
+        }
+        return tag;
+    }
+
     // 1. Motion & Physics Engine Detection
     if (window.gsap) {
         let gsapDesc = 'GSAP (GreenSock)';
@@ -80,13 +97,12 @@ PROBE_SOPHISTICATED_FEATURES_JS = """
 
             // A sticky scene track typically has a parent taller than the viewport
             const trackHeight = parentRect ? Math.round(parentRect.height) : Math.round(elRect.height);
-            const parentTag = parent ? parent.tagName.toLowerCase() : '';
-            const parentClass = parent && typeof parent.className === 'string' ? parent.className.trim() : '';
-            const selector = parentClass ? `${parentTag}.${parentClass.split(/\\s+/)[0]}` : el.tagName.toLowerCase();
+            const selector = parent ? makeElementSelector(parent) : makeElementSelector(el);
+            const dedupeKey = `${selector}@${Math.round((parentRect ? parentRect.top : elRect.top) + window.scrollY)}`;
 
-            if (!seenSticky.has(selector) && trackHeight > viewportHeight * 1.2) {
-                seenSticky.add(selector);
-                const itemsCount = el.querySelectorAll('[class*=\"item\"], [class*=\"card\"], li').length;
+            if (!seenSticky.has(dedupeKey) && trackHeight > viewportHeight * 1.2) {
+                seenSticky.add(dedupeKey);
+                const itemsCount = el.querySelectorAll('[class*="item"], [class*="card"], li').length;
                 results.sticky_tracks.push({
                     name: `Sticky Track (${selector})`,
                     selector: selector,
@@ -110,12 +126,11 @@ PROBE_SOPHISTICATED_FEATURES_JS = """
         for (const st of triggers) {
             if (st.pin && st.trigger) {
                 const el = st.trigger;
-                const tag = el.tagName.toLowerCase();
-                const cls = typeof el.className === 'string' ? el.className.split(/\\s+/)[0] : '';
-                const selector = cls ? `${tag}.${cls}` : tag;
-                if (!seenSticky.has(selector)) {
-                    seenSticky.add(selector);
-                    const r = el.getBoundingClientRect();
+                const selector = makeElementSelector(el);
+                const r = el.getBoundingClientRect();
+                const dedupeKey = `${selector}@${Math.round(r.top + window.scrollY)}`;
+                if (!seenSticky.has(dedupeKey)) {
+                    seenSticky.add(dedupeKey);
                     results.sticky_tracks.push({
                         name: `GSAP Pinned Scene (${selector})`,
                         selector: selector,
@@ -161,13 +176,12 @@ PROBE_SOPHISTICATED_FEATURES_JS = """
         );
 
         if (isLargeModal) {
-            const tag = el.tagName.toLowerCase();
-            const cls = typeof el.className === 'string' ? el.className.trim() : '';
-            const selector = cls ? `${tag}.${cls.split(/\\s+/)[0]}` : tag;
+            const selector = makeElementSelector(el);
+            const dedupeKey = el.id ? selector : `${selector}@${Math.round(rect.top + window.scrollY)}`;
 
-            if (!seenDrawers.has(selector) && selector !== 'body' && selector !== 'html') {
-                seenDrawers.add(selector);
-                const headings = Array.from(el.querySelectorAll('h1, h2, h3, [class*=\"title\"]'))
+            if (!seenDrawers.has(dedupeKey) && selector !== 'body' && selector !== 'html') {
+                seenDrawers.add(dedupeKey);
+                const headings = Array.from(el.querySelectorAll('h1, h2, h3, [class*="title"]'))
                     .map(h => (h.innerText || '').trim())
                     .filter(t => t.length > 0)
                     .slice(0, 5);
@@ -192,18 +206,17 @@ PROBE_SOPHISTICATED_FEATURES_JS = """
 
     // 4. Interactive Disclosures & Accordions
     const accordionTriggers = document.querySelectorAll(
-        'details, [aria-expanded], [class*=\"accordion\"], [class*=\"dropdown\"], .home-ser-item, [data-accordion]'
+        'details, [aria-expanded], [class*="accordion"], [class*="dropdown"], .home-ser-item, [data-accordion]'
     );
     const seenAccordions = new Set();
     for (const el of accordionTriggers) {
-        const tag = el.tagName.toLowerCase();
-        const cls = typeof el.className === 'string' ? el.className.split(/\\s+/)[0] : '';
-        const selector = cls ? `${tag}.${cls}` : tag;
-        if (!seenAccordions.has(selector)) {
-            seenAccordions.add(selector);
-            const titleEl = el.querySelector('summary, [class*=\"title\"], [class*=\"head\"], h1, h2, h3, h4');
+        const selector = makeElementSelector(el);
+        const r = el.getBoundingClientRect();
+        const dedupeKey = el.id ? selector : `${selector}@${Math.round(r.top + window.scrollY)}`;
+        if (!seenAccordions.has(dedupeKey)) {
+            seenAccordions.add(dedupeKey);
+            const titleEl = el.querySelector('summary, [class*="title"], [class*="head"], h1, h2, h3, h4');
             const title = titleEl ? (titleEl.innerText || '').trim() : '';
-            const r = el.getBoundingClientRect();
             results.disclosures.push({
                 name: `Interactive Disclosure (${selector})`,
                 selector: selector,
@@ -220,11 +233,9 @@ PROBE_SOPHISTICATED_FEATURES_JS = """
     }
 
     // 5. Marquees & Continuous Tickers
-    const marquees = document.querySelectorAll('[class*=\"marquee\"], [class*=\"ticker\"], [class*=\"client-list\"]');
+    const marquees = document.querySelectorAll('[class*="marquee"], [class*="ticker"], [class*="client-list"]');
     for (const el of marquees) {
-        const tag = el.tagName.toLowerCase();
-        const cls = typeof el.className === 'string' ? el.className.split(/\\s+/)[0] : '';
-        const selector = cls ? `${tag}.${cls}` : tag;
+        const selector = makeElementSelector(el);
         const r = el.getBoundingClientRect();
         results.marquees.push({
             name: `Continuous Stream (${selector})`,
@@ -242,7 +253,18 @@ PROBE_SOPHISTICATED_FEATURES_JS = """
     // 6. Dynamic Canvases
     const canvases = document.querySelectorAll('canvas');
     for (const c of canvases) {
-        const gl = c.getContext('webgl2') || c.getContext('webgl');
+        let gl = false;
+        if (c.__sleuth_context_type__) {
+            gl = c.__sleuth_context_type__.includes('webgl');
+        } else {
+            try {
+                if (c.getContext('2d')) {
+                    gl = false;
+                } else if (c.getContext('webgl2') || c.getContext('webgl') || c.getContext('experimental-webgl')) {
+                    gl = true;
+                }
+            } catch (e) {}
+        }
         const r = c.getBoundingClientRect();
         results.canvases.push({
             name: gl ? 'WebGL Shader Canvas' : '2D Dynamic Canvas',

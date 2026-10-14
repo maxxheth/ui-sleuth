@@ -130,7 +130,7 @@ class ScraplingEngine:
         explore_features: bool = True,
     ) -> None:
         self.url = url
-        self.wait_until = wait_until.lower().strip()
+        self.wait_until = wait_until.strip()
         self.timeout_seconds = timeout
         self.timeout_ms = timeout * 1000
         self.viewport = parse_viewport(viewport)
@@ -156,6 +156,24 @@ class ScraplingEngine:
         try:
             # Attach network interception listener for runtime 3D/video/motion assets
             page.on("response", self.collector.handle_response)
+
+            # Intercept canvas getContext to track active context type non-destructively
+            try:
+                page.add_init_script("""
+                (() => {
+                    try {
+                        const origGetContext = HTMLCanvasElement.prototype.getContext;
+                        HTMLCanvasElement.prototype.getContext = function(type, ...args) {
+                            if (!this.__sleuth_context_type__) {
+                                this.__sleuth_context_type__ = type;
+                            }
+                            return origGetContext.call(this, type, ...args);
+                        };
+                    } catch (e) {}
+                })();
+                """)
+            except Exception as e:
+                logger.debug("Could not attach canvas init script: %s", e)
 
             # Set viewport dimensions
             page.set_viewport_size(
@@ -242,20 +260,24 @@ class ScraplingEngine:
         }
 
         # Wait condition resolution
-        if self.wait_until == "networkidle":
+        wait_lower = self.wait_until.lower()
+        if wait_lower == "networkidle":
             fetch_kwargs["network_idle"] = True
             fetch_kwargs["load_dom"] = True
-        elif self.wait_until == "load":
+        elif wait_lower == "load":
             fetch_kwargs["network_idle"] = False
             fetch_kwargs["load_dom"] = True
         else:
-            # Custom CSS selector to wait for
+            # Custom CSS selector to wait for (preserves exact case)
             fetch_kwargs["wait_selector"] = self.wait_until
             fetch_kwargs["load_dom"] = True
 
         # Proxy integration (supports single Decodo proxy or Decodo round-robin rotator)
-        proxy_kwargs = self.proxy_config.to_scrapling_kwargs()
-        fetch_kwargs.update(proxy_kwargs)
+        # Skip proxies for loopback / local addresses
+        is_loopback = "127.0.0.1" in self.url or "localhost" in self.url
+        if not is_loopback:
+            proxy_kwargs = self.proxy_config.to_scrapling_kwargs()
+            fetch_kwargs.update(proxy_kwargs)
 
         # Execute Scrapling fetch
         try:

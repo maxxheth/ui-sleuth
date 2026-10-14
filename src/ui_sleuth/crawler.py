@@ -253,6 +253,10 @@ class SiteCrawler:
         if not self.entry_url.startswith(("http://", "https://")):
             self.entry_url = f"https://{self.entry_url}"
 
+        normalized_entry = normalize_url(self.entry_url, self.entry_url)
+        if normalized_entry:
+            self.entry_url = normalized_entry
+
         self.max_pages = max(1, max_pages)
         self.max_depth = max(0, max_depth)
         self.output_dir = output_dir or Path("./output")
@@ -784,7 +788,7 @@ class SiteCrawler:
                 urls = "_".join(sorted(asset.direct_asset_urls))
                 key = f"{asset.category}:{urls}:{asset.suggested_react_wrapper}"
                 if key not in assets_dict:
-                    assets_dict[key] = asset
+                    assets_dict[key] = asset.model_copy(deep=True)
                 else:
                     # Union URLs
                     existing = assets_dict[key]

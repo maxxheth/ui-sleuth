@@ -23,6 +23,12 @@ logger = logging.getLogger(__name__)
 # Complete client-side JS evaluation script
 HARVEST_TOKENS_JS = """
 () => {
+    const colorCanvas = document.createElement('canvas');
+    colorCanvas.width = 1;
+    colorCanvas.height = 1;
+    let colorCtx = null;
+    try { colorCtx = colorCanvas.getContext('2d'); } catch (e) {}
+
     function rgbToHex(rgbStr) {
         if (!rgbStr || rgbStr === 'transparent' || rgbStr === 'rgba(0, 0, 0, 0)') {
             return null;
@@ -33,12 +39,38 @@ HARVEST_TOKENS_JS = """
             }
             return rgbStr.toLowerCase().slice(0, 7);
         }
-        const match = rgbStr.match(/rgba?\\((\\d+)[,\\s]+(\\d+)[,\\s]+(\\d+)/);
-        if (!match) return null;
-        const r = parseInt(match[1], 10).toString(16).padStart(2, '0');
-        const g = parseInt(match[2], 10).toString(16).padStart(2, '0');
-        const b = parseInt(match[3], 10).toString(16).padStart(2, '0');
-        return ('#' + r + g + b).toLowerCase();
+
+        const match = rgbStr.match(/rgba?\\((\\d+)[,\\s]+(\\d+)[,\\s]+(\\d+)(?:[,/\\s]+([\\d.]+))?\\)/);
+        if (match) {
+            if (match[4] !== undefined && parseFloat(match[4]) < 0.1) {
+                return null;
+            }
+            const r = parseInt(match[1], 10).toString(16).padStart(2, '0');
+            const g = parseInt(match[2], 10).toString(16).padStart(2, '0');
+            const b = parseInt(match[3], 10).toString(16).padStart(2, '0');
+            return ('#' + r + g + b).toLowerCase();
+        }
+
+        // Support modern CSS color functions (oklch, lab, color(), hsl) by normalizing via 2D canvas context
+        if (colorCtx) {
+            try {
+                colorCtx.fillStyle = '#000000';
+                colorCtx.fillStyle = rgbStr;
+                const normalized = colorCtx.fillStyle;
+                if (normalized && normalized !== '#000000') {
+                    if (normalized.startsWith('#')) return normalized.toLowerCase().slice(0, 7);
+                    const nMatch = normalized.match(/rgba?\\((\\d+)[,\\s]+(\\d+)[,\\s]+(\\d+)(?:[,/\\s]+([\\d.]+))?\\)/);
+                    if (nMatch) {
+                        if (nMatch[4] !== undefined && parseFloat(nMatch[4]) < 0.1) return null;
+                        const r = parseInt(nMatch[1], 10).toString(16).padStart(2, '0');
+                        const g = parseInt(nMatch[2], 10).toString(16).padStart(2, '0');
+                        const b = parseInt(nMatch[3], 10).toString(16).padStart(2, '0');
+                        return ('#' + r + g + b).toLowerCase();
+                    }
+                }
+            } catch (e) {}
+        }
+        return null;
     }
 
     // 1. HARVEST COLORS

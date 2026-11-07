@@ -206,3 +206,83 @@ def test_page_setup_resets_collector_and_action_data():
     assert engine.collector is not old_collector
     assert engine._action_data == {}
     page.on.assert_called_once_with("response", engine.collector.handle_response)
+
+
+def test_engine_with_session_uses_session_fetch_without_browser_level_kwargs(monkeypatch):
+    fake_cls = MagicMock()
+    monkeypatch.setattr(scrapling_engine, "DynamicFetcher", fake_cls)
+    session = MagicMock()
+    session.fetch.side_effect = RuntimeError("stop")
+    engine = ScraplingEngine(
+        url="https://example.com/",
+        proxy_config=ProxyConfig(single_proxy=PROXY),
+        session=session,
+    )
+    with pytest.raises(RuntimeError):
+        engine.execute()
+    fake_cls.fetch.assert_not_called()
+    kwargs = session.fetch.call_args.kwargs
+    for session_level in ("headless", "real_chrome", "additional_args", "proxy", "proxy_rotator"):
+        assert session_level not in kwargs
+    assert kwargs["page_setup"] == engine._page_setup
+    assert kwargs["page_action"] == engine._page_action
+    # tabs are discarded so listeners and init scripts do not accumulate
+    session.close_pages.assert_called_once()
+
+
+def test_browser_session_configuration_and_close(monkeypatch):
+    created = {}
+
+    class FakeSession:
+        def __init__(self, **kwargs):
+            created["kwargs"] = kwargs
+            created["closed"] = False
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            created["closed"] = True
+
+    monkeypatch.setattr(scrapling_engine, "DynamicSession", FakeSession)
+    with (
+        pytest.raises(ValueError),
+        scrapling_engine.browser_session(
+            "https://example.com/",
+            proxy_config=ProxyConfig(single_proxy=PROXY),
+            real_chrome=False,
+            viewport="800x600",
+            timeout=10,
+        ),
+    ):
+        raise ValueError("boom")
+    assert created["closed"] is True
+    kw = created["kwargs"]
+    assert kw["proxy"] == PROXY
+    assert kw["real_chrome"] is False
+    assert kw["timeout"] == 10000
+    assert kw["additional_args"]["viewport"] == {"width": 800, "height": 600}
+
+
+def test_browser_session_skips_proxy_for_loopback_and_picks_stealth(monkeypatch):
+    created = {}
+
+    class FakeStealth:
+        def __init__(self, **kwargs):
+            created["kwargs"] = kwargs
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            pass
+
+    monkeypatch.setattr(scrapling_engine, "StealthySession", FakeStealth)
+    with scrapling_engine.browser_session(
+        "http://localhost:3000/",
+        proxy_config=ProxyConfig(single_proxy=PROXY),
+        use_stealth=True,
+        real_chrome=False,
+    ):
+        pass
+    assert "proxy" not in created["kwargs"]

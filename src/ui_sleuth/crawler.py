@@ -4,8 +4,11 @@ from __future__ import annotations
 
 import collections
 import datetime
+import hashlib
+import heapq
 import logging
 import re
+from contextlib import ExitStack
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 from urllib.parse import urljoin, urlparse, urlunparse
@@ -31,7 +34,7 @@ from ui_sleuth.models import (
     SpacingElevationTokens,
     TypographyTokens,
 )
-from ui_sleuth.scrapling_engine import ScraplingEngine
+from ui_sleuth.scrapling_engine import ScraplingEngine, browser_session
 
 if TYPE_CHECKING:
     from ui_sleuth.proxy_manager import ProxyConfig
@@ -94,18 +97,65 @@ TRACKING_PARAMS = {
     "mc_eid",
 }
 
+# Max sophisticated features kept per category in site-level synthesis
+MAX_FEATURES_PER_CATEGORY = 5
+
+_MAX_SLUG_LEN = 80
+
 
 def slugify_url(url: str) -> str:
-    """Generate a clean, filesystem-safe directory slug from a URL."""
+    """Generate a clean, filesystem-safe directory slug from a URL (path plus query).
+
+    Not guaranteed unique on its own (``/about-us`` and ``/about/us`` match); use
+    ``SlugRegistry`` to assign collision-free slugs across a crawl.
+    """
     parsed = urlparse(url)
-    path = parsed.path.strip("/")
-    if not path:
+    raw = parsed.path.strip("/")
+    if parsed.query:
+        raw = f"{raw}-{parsed.query}" if raw else parsed.query
+    if not raw:
         return "index"
 
     # Replace slashes and unsafe characters with hyphens
-    slug = re.sub(r"[^a-zA-Z0-9_-]+", "-", path)
+    slug = re.sub(r"[^a-zA-Z0-9_-]+", "-", raw)
     slug = slug.strip("-").lower()
+    if len(slug) > _MAX_SLUG_LEN:
+        slug = f"{slug[:_MAX_SLUG_LEN].rstrip('-')}-{_short_hash(url)}"
     return slug or "index"
+
+
+def _short_hash(url: str) -> str:
+    parsed = urlparse(url)
+    return hashlib.sha1(f"{parsed.path}?{parsed.query}".encode()).hexdigest()[:6]
+
+
+class SlugRegistry:
+    """Assigns each crawled URL a unique, stable, filesystem-safe slug."""
+
+    def __init__(self) -> None:
+        self._by_url: dict[str, str] = {}
+        self._used: set[str] = set()
+
+    def assign(self, url: str) -> str:
+        existing = self._by_url.get(url)
+        if existing is not None:
+            return existing
+        base = slugify_url(url)
+        slug = base
+        if slug in self._used:
+            slug = f"{base}-{_short_hash(url)}"
+        counter = 2
+        while slug in self._used:
+            slug = f"{base}-{counter}"
+            counter += 1
+        self._used.add(slug)
+        self._by_url[url] = slug
+        return slug
+
+
+def _effective_port(port: int | None) -> int | None:
+    """Treat an absent, :80 and :443 port as the same default port."""
+    return None if port in (None, 80, 443) else port
 
 
 def normalize_url(url: str, base_url: str) -> str | None:
@@ -128,10 +178,16 @@ def normalize_url(url: str, base_url: str) -> str | None:
     if parsed.scheme not in ("http", "https"):
         return None
 
-    # Compare hostnames (allow matching with or without 'www.')
-    base_host = urlparse(base_url).netloc.lower().removeprefix("www.")
-    target_host = parsed.netloc.lower().removeprefix("www.")
-    if base_host != target_host:
+    # Same-site check: hostname (ignoring 'www.') and port (80/443/none are all "default")
+    try:
+        base_parsed = urlparse(base_url)
+        base_host = (base_parsed.hostname or "").removeprefix("www.")
+        target_host = (parsed.hostname or "").removeprefix("www.")
+        base_port = _effective_port(base_parsed.port)
+        target_port = _effective_port(parsed.port)
+    except ValueError:
+        return None
+    if not base_host or base_host != target_host or base_port != target_port:
         return None
 
     # Check file extension
@@ -152,14 +208,16 @@ def normalize_url(url: str, base_url: str) -> str | None:
                 if pair.lower() not in TRACKING_PARAMS:
                     query_parts.append(pair)
 
-    new_query = "&".join(query_parts)
+    # Order-insensitive: ?a=1&b=2 and ?b=2&a=1 are the same page
+    new_query = "&".join(sorted(query_parts))
 
     # Rebuild normalized URL without fragments
     clean_path = parsed.path or "/"
     if clean_path != "/" and clean_path.endswith("/"):
         clean_path = clean_path.rstrip("/")
 
-    normalized = urlunparse((parsed.scheme, parsed.netloc, clean_path, "", new_query, ""))
+    # Canonical origin: reuse the base URL's scheme and host so www/http/:443 variants collapse
+    normalized = urlunparse((base_parsed.scheme, base_parsed.netloc, clean_path, "", new_query, ""))
     return normalized
 
 
@@ -288,14 +346,18 @@ class SiteCrawler:
 
     def crawl(self) -> MultiPageCrawlResult:
         """Execute multi-page crawl across site and synthesize global design system."""
-        visited: set[str] = set()
-        queued: set[str] = {self.entry_url}
+        visited: set[str] = set()  # canonical URLs ever queued (dedupes discovery)
         page_blueprints: dict[str, SiteBlueprint] = {}
         failed_pages: list[FailedPage] = []
+        fetched: set[str] = set()  # URLs actually crawled, including redirect targets
+        slugs = SlugRegistry()
+        crawled = 0
 
-        # Queue items: (priority_score, depth, url)
+        # Min-heap of (-priority_score, sequence, depth, url): highest score first, FIFO on ties.
         # Entry URL has highest priority (1000)
-        url_queue: list[tuple[int, int, str]] = [(1000, 0, self.entry_url)]
+        seq = 0
+        url_queue: list[tuple[float, int, int, str]] = [(-1000, seq, 0, self.entry_url)]
+        visited.add(self.entry_url)  # "known" set: queued or crawled
 
         logger.info(
             "Starting multi-page crawl for %s (max_pages=%d, max_depth=%d)",
@@ -304,70 +366,95 @@ class SiteCrawler:
             self.max_depth,
         )
 
-        while url_queue and len(visited) < self.max_pages:
-            # Pop highest priority URL
-            url_queue.sort(key=lambda x: x[0], reverse=True)
-            _, depth, current_url = url_queue.pop(0)
-
-            if current_url in visited:
-                continue
-
-            visited.add(current_url)
-            slug = slugify_url(current_url)
-
-            # Screenshot setup if requested
-            screenshot_path = None
-            if self.capture_screenshots:
-                screenshot_path = self.output_dir / "pages" / slug / "screenshot.png"
-
-            logger.info(
-                "[%d/%d] Crawling page: %s (depth=%d)",
-                len(visited),
-                self.max_pages,
-                current_url,
-                depth,
-            )
-
+        with ExitStack() as stack:
+            # One browser for the whole crawl (closed by the stack even on errors)
             try:
-                engine = ScraplingEngine(
-                    url=current_url,
-                    wait_until=self.wait_until,
-                    timeout=self.timeout,
-                    viewport=self.viewport,
-                    proxy_config=self.proxy_config,
-                    use_stealth=self.use_stealth,
-                    real_chrome=self.real_chrome,
-                    headless=self.headless,
-                    screenshot_path=screenshot_path,
-                    delay=self.delay,
-                    auto_scroll=self.auto_scroll,
-                    explore_features=self.explore_features,
+                session = stack.enter_context(
+                    browser_session(
+                        self.entry_url,
+                        timeout=self.timeout,
+                        viewport=self.viewport,
+                        proxy_config=self.proxy_config,
+                        use_stealth=self.use_stealth,
+                        real_chrome=self.real_chrome,
+                        headless=self.headless,
+                    )
                 )
-                blueprint = engine.execute()
-                page_blueprints[current_url] = blueprint
-
-                # If depth allows, discover more internal links
-                if depth < self.max_depth and len(visited) < self.max_pages:
-                    # In ScraplingEngine, action_data holds HTML text from fetch
-                    raw_html = getattr(engine, "_action_data", {}).get("raw_html", "")
-                    if not raw_html:
-                        # Extract landmark text or fetch html if accessible
-                        raw_html = ""
-
-                    discovered = extract_links_from_html(raw_html, current_url)
-                    for link_url, _, score in discovered:
-                        if link_url not in visited and link_url not in queued:
-                            queued.add(link_url)
-                            url_queue.append((score, depth + 1, link_url))
-
             except Exception as e:
                 error = _summarize_error(e)
-                logger.error("Failed to extract page %s: %s", current_url, error)
-                failed_pages.append(FailedPage(url=current_url, error=error))
+                logger.error("Failed to start browser session: %s", error)
+                failed_pages.append(FailedPage(url=self.entry_url, error=error))
+                url_queue.clear()
+                session = None
+
+            while url_queue and crawled < self.max_pages:
+                _, _, depth, current_url = heapq.heappop(url_queue)
+                if current_url in fetched:
+                    continue  # already crawled under a redirect from another URL
+                fetched.add(current_url)
+                crawled += 1
+                slug = slugs.assign(current_url)
+
+                # Screenshot setup if requested
+                screenshot_path = None
+                if self.capture_screenshots:
+                    screenshot_path = self.output_dir / "pages" / slug / "screenshot.png"
+
+                logger.info(
+                    "[%d/%d] Crawling page: %s (depth=%d)",
+                    crawled,
+                    self.max_pages,
+                    current_url,
+                    depth,
+                )
+
+                try:
+                    engine = ScraplingEngine(
+                        url=current_url,
+                        wait_until=self.wait_until,
+                        timeout=self.timeout,
+                        viewport=self.viewport,
+                        proxy_config=self.proxy_config,
+                        use_stealth=self.use_stealth,
+                        real_chrome=self.real_chrome,
+                        headless=self.headless,
+                        screenshot_path=screenshot_path,
+                        delay=self.delay,
+                        auto_scroll=self.auto_scroll,
+                        explore_features=self.explore_features,
+                        session=session,
+                    )
+                    blueprint = engine.execute()
+                    page_blueprints[current_url] = blueprint
+
+                    # Redirect targets count as seen so they are not crawled a second time
+                    final_url = getattr(engine, "final_url", None)
+                    if isinstance(final_url, str):
+                        canonical_final = normalize_url(final_url, self.entry_url)
+                        if canonical_final:
+                            visited.add(canonical_final)
+                            fetched.add(canonical_final)
+
+                    # If depth allows, discover more internal links
+                    if depth < self.max_depth and crawled < self.max_pages:
+                        # In ScraplingEngine, action_data holds HTML text from fetch
+                        raw_html = getattr(engine, "_action_data", {}).get("raw_html", "")
+
+                        discovered = extract_links_from_html(raw_html, current_url)
+                        for link_url, _, score in discovered:
+                            if link_url not in visited:
+                                visited.add(link_url)
+                                seq += 1
+                                heapq.heappush(url_queue, (-score, seq, depth + 1, link_url))
+
+                except Exception as e:
+                    error = _summarize_error(e)
+                    logger.error("Failed to extract page %s: %s", current_url, error)
+                    failed_pages.append(FailedPage(url=current_url, error=error))
 
         # Synthesize global design system from all collected blueprints
         now_iso = datetime.datetime.now(datetime.UTC).isoformat()
-        design_system = self.synthesize_design_system(page_blueprints)
+        design_system = self.synthesize_design_system(page_blueprints, slugs=slugs)
 
         return MultiPageCrawlResult(
             design_system=design_system,
@@ -379,6 +466,7 @@ class SiteCrawler:
     def synthesize_design_system(
         self,
         blueprints: dict[str, SiteBlueprint],
+        slugs: SlugRegistry | None = None,
     ) -> SiteDesignSystem:
         """Consolidate design tokens, component systems, and motion runtimes across pages."""
         domain = urlparse(self.entry_url).netloc
@@ -408,8 +496,9 @@ class SiteCrawler:
 
         # 6. Build Page Summaries
         page_summaries: list[CrawledPageSummary] = []
+        slugs = slugs or SlugRegistry()
         for page_url, bp in blueprints.items():
-            slug = slugify_url(page_url)
+            slug = slugs.assign(page_url)
             parsed_path = urlparse(page_url).path or "/"
             features = (
                 [f.name for f in bp.sophisticated_features.features]
@@ -644,7 +733,7 @@ class SiteCrawler:
                     layout_hint="flex-row items-center justify-between",
                     sample_content={
                         "actions": list(dict.fromkeys(nav_actions))[:4],
-                        "classes": list(nav_classes)[:5],
+                        "classes": sorted(nav_classes)[:5],
                     },
                     subcomponents=["NavbarBrand", "NavbarMenu", "NavbarActions"],
                 )
@@ -683,7 +772,7 @@ class SiteCrawler:
                     layout_hint="grid or multi-column flex",
                     sample_content={
                         "actions": list(dict.fromkeys(footer_actions))[:4],
-                        "classes": list(footer_classes)[:5],
+                        "classes": sorted(footer_classes)[:5],
                     },
                     subcomponents=["FooterColumn", "FooterCopyright"],
                 )
@@ -791,7 +880,14 @@ class SiteCrawler:
                     if key not in features_dict:
                         features_dict[key] = feat
 
-        return sorted(engines_set), list(features_dict.values())
+        # Cap per category so a feature-heavy site cannot flood the design system
+        per_category: dict[str, int] = collections.defaultdict(int)
+        capped: list[SophisticatedFeature] = []
+        for feat in features_dict.values():
+            if per_category[feat.category] < MAX_FEATURES_PER_CATEGORY:
+                per_category[feat.category] += 1
+                capped.append(feat)
+        return sorted(engines_set), capped
 
     def _synthesize_external_assets(
         self,
@@ -800,11 +896,14 @@ class SiteCrawler:
         """Deduplicate external production assets discovered site-wide."""
         assets_dict: dict[str, ExternalProductionAsset] = {}
 
-        for bp in blueprints.values():
-            for asset in bp.external_production_assets:
-                # Key by category + primary direct asset URL or wrapper
-                urls = "_".join(sorted(asset.direct_asset_urls))
-                key = f"{asset.category}:{urls}:{asset.suggested_react_wrapper}"
+        for page_url, bp in blueprints.items():
+            for index, asset in enumerate(bp.external_production_assets):
+                # Key by category + primary asset URL; URL-less assets (canvases) are
+                # distinct per page and position since there is nothing to match on
+                if asset.direct_asset_urls:
+                    key = f"{asset.category}:{sorted(asset.direct_asset_urls)[0]}"
+                else:
+                    key = f"{asset.category}:{page_url}#{index}"
                 if key not in assets_dict:
                     assets_dict[key] = asset.model_copy(deep=True)
                 else:

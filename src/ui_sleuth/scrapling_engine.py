@@ -7,11 +7,14 @@ import ipaddress
 import logging
 import os
 import shutil
+from collections.abc import Generator
+from contextlib import contextmanager
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 from urllib.parse import urlparse
 
 from scrapling import DynamicFetcher, StealthyFetcher
+from scrapling.fetchers import DynamicSession, StealthySession
 
 from ui_sleuth.asset_inspector import (
     NetworkAssetCollector,
@@ -179,6 +182,41 @@ def is_loopback_url(url: str) -> bool:
         return host == "localhost" or host.endswith(".localhost")
 
 
+@contextmanager
+def browser_session(
+    url: str,
+    *,
+    timeout: int = 30,
+    viewport: str = "1440x900",
+    proxy_config: ProxyConfig | None = None,
+    use_stealth: bool = False,
+    real_chrome: bool | None = None,
+    headless: bool = True,
+) -> Generator[Any]:
+    """Open one Scrapling browser session to be reused for several pages.
+
+    Browser-level options (headless, real_chrome, viewport, proxy) are fixed for the whole
+    session; per-page options (wait condition, hooks, timeout) are passed to ``fetch``.
+    The session is always closed on exit, including when the body raises.
+    """
+    proxy_config = proxy_config or ProxyConfig()
+    resolved_chrome = is_chrome_installed() if real_chrome is None else real_chrome
+    session_kwargs: dict[str, Any] = {
+        "timeout": timeout * 1000,
+        "headless": headless,
+        "real_chrome": resolved_chrome,
+        "additional_args": {"viewport": parse_viewport(viewport), "device_scale_factor": 1},
+    }
+    if is_loopback_url(url):
+        if proxy_config.has_proxy:
+            logger.info("Skipping configured proxy for loopback target %s", url)
+    else:
+        session_kwargs.update(proxy_config.to_scrapling_kwargs())
+    session_cls = StealthySession if use_stealth else DynamicSession
+    with session_cls(**session_kwargs) as session:
+        yield session
+
+
 class ScraplingEngine:
     """Core extraction engine integrating Scrapling, network hooks, and multimodal capture."""
 
@@ -196,7 +234,11 @@ class ScraplingEngine:
         delay: float = 2.0,
         auto_scroll: bool = True,
         explore_features: bool = True,
+        session: Any | None = None,
     ) -> None:
+        # Optional shared browser session (see browser_session); None opens a one-off browser
+        self.session = session
+        self.final_url: str | None = None
         self.url = url
         self.wait_until = wait_until.strip()
         self.timeout_seconds = timeout
@@ -345,15 +387,17 @@ class ScraplingEngine:
         # Configure wait condition parameters
         fetch_kwargs: dict[str, Any] = {
             "timeout": self.timeout_ms,
-            "headless": self.headless,
-            "real_chrome": self.real_chrome,
             "page_setup": self._page_setup,
             "page_action": self._page_action,
-            "additional_args": {
+        }
+        if self.session is None:
+            # Browser-level options; a shared session already carries them
+            fetch_kwargs["headless"] = self.headless
+            fetch_kwargs["real_chrome"] = self.real_chrome
+            fetch_kwargs["additional_args"] = {
                 "viewport": self.viewport,
                 "device_scale_factor": 1,
-            },
-        }
+            }
 
         # Wait condition resolution
         wait_lower = self.wait_until.lower()
@@ -370,7 +414,9 @@ class ScraplingEngine:
 
         # Proxy integration (supports single Decodo proxy or Decodo round-robin rotator)
         # Skip proxies for loopback / local addresses
-        if is_loopback_url(self.url):
+        if self.session is not None:
+            pass  # proxy is configured once on the shared session
+        elif is_loopback_url(self.url):
             if self.proxy_config.has_proxy:
                 logger.info("Skipping configured proxy for loopback target %s", self.url)
         else:
@@ -378,7 +424,18 @@ class ScraplingEngine:
 
         # Execute Scrapling fetch
         try:
-            response = fetcher_cls.fetch(self.url, **fetch_kwargs)
+            if self.session is not None:
+                try:
+                    response = self.session.fetch(self.url, **fetch_kwargs)
+                finally:
+                    # Pooled tabs would keep listeners/init scripts from this page
+                    close_pages = getattr(self.session, "close_pages", None)
+                    if callable(close_pages):
+                        close_pages()
+            else:
+                response = fetcher_cls.fetch(self.url, **fetch_kwargs)
+            final_url = getattr(response, "url", None)
+            self.final_url = final_url if isinstance(final_url, str) else None
             status_code = getattr(response, "status", 200)
             raw_body = getattr(response, "body", b"")
             html_text = (

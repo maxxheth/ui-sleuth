@@ -1,5 +1,6 @@
 """Unit tests for the multi-page crawler and design system synthesizer."""
 
+import re
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
@@ -8,6 +9,7 @@ from typer.testing import CliRunner
 from ui_sleuth.cli import app
 from ui_sleuth.crawler import (
     SiteCrawler,
+    SlugRegistry,
     extract_links_from_html,
     normalize_url,
     slugify_url,
@@ -17,6 +19,7 @@ from ui_sleuth.models import (
     ColorPalette,
     ColorToken,
     DesignTokens,
+    ExternalProductionAsset,
     HeaderScale,
     InteractionMetadata,
     MultiPageCrawlResult,
@@ -39,7 +42,23 @@ def test_slugify_url():
     assert slugify_url("https://example.com/pricing") == "pricing"
     assert slugify_url("https://example.com/pricing/") == "pricing"
     assert slugify_url("https://example.com/products/ai-agent") == "products-ai-agent"
-    assert slugify_url("https://example.com/about-us?test=1") == "about-us"
+    assert slugify_url("https://example.com/about-us?test=1") == "about-us-test-1"
+    assert slugify_url("https://example.com/" + "a" * 200).startswith("a" * 80 + "-")
+
+
+def test_slug_registry_unique_for_colliding_urls():
+    reg = SlugRegistry()
+    urls = [
+        "https://example.com/shop?cat=a",
+        "https://example.com/shop?cat=b",
+        "https://example.com/about-us",
+        "https://example.com/about/us",
+        "https://example.com/shop-cat-a",
+    ]
+    slugs = [reg.assign(u) for u in urls]
+    assert len(set(slugs)) == len(urls)
+    assert reg.assign(urls[0]) == slugs[0]  # stable
+    assert all(re.fullmatch(r"[a-z0-9_-]+", s) for s in slugs)
 
 
 def test_normalize_url():
@@ -49,11 +68,24 @@ def test_normalize_url():
     assert normalize_url("/pricing", base) == "https://example.com/pricing"
     assert normalize_url("about", base) == "https://example.com/about"
 
-    # Domain matching with www
+    # www / http / default-port variants collapse onto the base origin
+    assert normalize_url("https://www.example.com/features", base) == "https://example.com/features"
+    assert normalize_url("http://example.com/features", base) == "https://example.com/features"
+    assert normalize_url("https://example.com:443/features", base) == "https://example.com/features"
+    assert normalize_url("http://www.example.com:80/", base) == "https://example.com/"
+    assert normalize_url("https://example.com:8443/features", base) is None
     assert (
-        normalize_url("https://www.example.com/features", base)
-        == "https://www.example.com/features"
+        normalize_url("https://www.example.com/", "https://example.com") == "https://example.com/"
     )
+    assert (
+        normalize_url("https://example.com/", "https://www.example.com/")
+        == "https://www.example.com/"
+    )
+    assert normalize_url("https://evil.com@example.com.evil.com/", base) is None
+
+    # Query parameter order is irrelevant
+    assert normalize_url("/s?b=2&a=1", base) == normalize_url("/s?a=1&b=2", base)
+    assert normalize_url("/s?b=2&a=1", base) == "https://example.com/s?a=1&b=2"
     assert normalize_url("https://otherdomain.com/blog", base) is None
 
     # Fragments stripped
@@ -348,7 +380,15 @@ def test_crawler_entry_url_canonicalization():
 
 
 def _patch_engine(monkeypatch, failing_urls):
+    from contextlib import contextmanager
+
     from ui_sleuth import crawler as crawler_mod
+
+    @contextmanager
+    def fake_session(url, **kwargs):
+        yield object()
+
+    monkeypatch.setattr(crawler_mod, "browser_session", fake_session)
 
     class FakeEngine:
         def __init__(self, url, **kwargs):
@@ -410,3 +450,227 @@ def test_crawl_partial_failure_exit_0_and_manifest(monkeypatch, tmp_path):
     manifest = json.loads(saved["manifest_json"].read_text())
     assert manifest["failed_pages"][0]["url"] == "https://example.com/bad"
     assert "secretpw" not in json.dumps(manifest)
+
+
+def _seed_links(monkeypatch, links):
+    from ui_sleuth import crawler as crawler_mod
+
+    monkeypatch.setattr(
+        crawler_mod, "extract_links_from_html", lambda html, base: [(u, "x", 50) for u in links]
+    )
+
+
+def test_crawl_opens_exactly_one_session_and_closes_it(monkeypatch, tmp_path):
+    from contextlib import contextmanager
+
+    from ui_sleuth import crawler as crawler_mod
+
+    events = []
+    sessions = []
+
+    @contextmanager
+    def counting_session(url, **kwargs):
+        events.append("open")
+        sess = object()
+        try:
+            yield sess
+        finally:
+            events.append("close")
+
+    class FakeEngine:
+        def __init__(self, url, **kwargs):
+            self.url = url
+            sessions.append(kwargs["session"])
+
+        def execute(self):
+            return create_mock_blueprint(self.url, "T", ["#112233"], "Inter")
+
+    monkeypatch.setattr(crawler_mod, "browser_session", counting_session)
+    monkeypatch.setattr(crawler_mod, "ScraplingEngine", FakeEngine)
+    _seed_links(monkeypatch, ["https://example.com/a", "https://example.com/b"])
+    res = SiteCrawler("https://example.com", max_pages=3, max_depth=1, output_dir=tmp_path).crawl()
+    assert res.design_system.total_pages_crawled == 3
+    assert events == ["open", "close"]
+    assert len(sessions) == 3 and len({id(s) for s in sessions}) == 1
+
+
+def test_crawl_closes_session_when_page_raises_unexpectedly(monkeypatch, tmp_path):
+    from contextlib import contextmanager
+
+    from ui_sleuth import crawler as crawler_mod
+
+    events = []
+
+    @contextmanager
+    def counting_session(url, **kwargs):
+        events.append("open")
+        try:
+            yield object()
+        finally:
+            events.append("close")
+
+    def boom(*a, **k):
+        raise KeyboardInterrupt
+
+    class FakeEngine:
+        def __init__(self, url, **kwargs):
+            pass
+
+        execute = boom
+
+    monkeypatch.setattr(crawler_mod, "browser_session", counting_session)
+    monkeypatch.setattr(crawler_mod, "ScraplingEngine", FakeEngine)
+    import pytest
+
+    with pytest.raises(KeyboardInterrupt):
+        SiteCrawler("https://example.com", output_dir=tmp_path).crawl()
+    assert events == ["open", "close"]
+
+
+def test_crawl_session_start_failure_is_recorded(monkeypatch, tmp_path):
+    from ui_sleuth import crawler as crawler_mod
+
+    def broken(url, **kwargs):
+        raise RuntimeError("no browser installed")
+
+    monkeypatch.setattr(crawler_mod, "browser_session", broken)
+    res = SiteCrawler("https://example.com", output_dir=tmp_path).crawl()
+    assert res.design_system.total_pages_crawled == 0
+    assert "no browser installed" in res.failed_pages[0].error
+
+
+def test_crawl_priority_order_and_redirect_dedupe(monkeypatch, tmp_path):
+    from ui_sleuth import crawler as crawler_mod
+
+    _patch_engine(monkeypatch, set())
+    order = []
+
+    class FakeEngine:
+        def __init__(self, url, **kwargs):
+            self.url = url
+            self.final_url = "https://www.example.com/landing" if url.endswith("/old") else None
+
+        def execute(self):
+            order.append(self.url)
+            return create_mock_blueprint(self.url, "T", ["#112233"], "Inter")
+
+    monkeypatch.setattr(crawler_mod, "ScraplingEngine", FakeEngine)
+    monkeypatch.setattr(
+        crawler_mod,
+        "extract_links_from_html",
+        lambda html, base: [
+            ("https://example.com/low", "x", 10),
+            ("https://example.com/old", "x", 90),
+            ("https://example.com/landing", "x", 80),
+            ("https://example.com/tie1", "x", 10),
+        ],
+    )
+    SiteCrawler("https://example.com", max_pages=10, max_depth=1, output_dir=tmp_path).crawl()
+    # high score first, ties FIFO, redirect target /landing not fetched again
+    assert order == [
+        "https://example.com/",
+        "https://example.com/old",
+        "https://example.com/low",
+        "https://example.com/tie1",
+    ]
+
+
+def test_colliding_urls_get_distinct_paths(monkeypatch, tmp_path):
+    from ui_sleuth import crawler as crawler_mod
+
+    shots = []
+
+    class FakeEngine:
+        def __init__(self, url, **kwargs):
+            self.url = url
+            self.shot = kwargs.get("screenshot_path")
+            shots.append(self.shot)
+
+        def execute(self):
+            bp = create_mock_blueprint(self.url, "T", ["#112233"], "Inter")
+            bp.screenshot_path = str(self.shot)
+            return bp
+
+    _patch_engine(monkeypatch, set())
+    monkeypatch.setattr(crawler_mod, "ScraplingEngine", FakeEngine)
+    _seed_links(
+        monkeypatch,
+        [
+            "https://example.com/shop?cat=a",
+            "https://example.com/shop?cat=b",
+            "https://example.com/about-us",
+            "https://example.com/about/us",
+        ],
+    )
+    res = SiteCrawler(
+        "https://example.com",
+        max_pages=5,
+        max_depth=1,
+        output_dir=tmp_path,
+        capture_screenshots=True,
+    ).crawl()
+    pages = res.design_system.pages
+    assert len(pages) == 5
+    assert len({p.blueprint_path for p in pages}) == 5
+    assert len({p.screenshot_path for p in pages}) == 5
+    assert len(set(shots)) == 5
+    saved = export_site_design_system(res, tmp_path / "out")
+    assert len(list((saved["manifest_json"].parent / "pages").iterdir())) == 5
+
+
+def test_synthesis_assets_dedupe_by_primary_url_and_canvases_stay_per_page():
+    crawler = SiteCrawler("https://example.com")
+
+    def bp_with(url, assets):
+        bp = create_mock_blueprint(url, "T", ["#112233"], "Inter")
+        bp.external_production_assets = assets
+        return bp
+
+    def asset(category, urls):
+        return ExternalProductionAsset(
+            category=category, direct_asset_urls=urls, suggested_react_wrapper="w"
+        )
+
+    ds = crawler.synthesize_design_system(
+        {
+            "https://example.com/": bp_with(
+                "https://example.com/",
+                [asset("3d_model", ["https://cdn/a.glb"]), asset("interactive_canvas", [])],
+            ),
+            "https://example.com/x": bp_with(
+                "https://example.com/x",
+                [
+                    asset("3d_model", ["https://cdn/a.glb", "https://cdn/b.glb"]),
+                    asset("interactive_canvas", []),
+                ],
+            ),
+        }
+    )
+    models = [a for a in ds.external_assets if a.category == "3d_model"]
+    canvases = [a for a in ds.external_assets if a.category == "interactive_canvas"]
+    assert len(models) == 1
+    assert models[0].direct_asset_urls == ["https://cdn/a.glb", "https://cdn/b.glb"]
+    assert len(canvases) == 2
+
+
+def test_synthesis_caps_features_per_category():
+    from ui_sleuth.crawler import MAX_FEATURES_PER_CATEGORY
+
+    crawler = SiteCrawler("https://example.com")
+    bp = create_mock_blueprint("https://example.com/", "T", ["#112233"], "Inter")
+    bp.sophisticated_features = SophisticatedFeaturesSummary(
+        features=[
+            SophisticatedFeature(
+                category="marquee_stream",
+                name=f"m{i}",
+                selector=f".m{i}",
+                description="d",
+            )
+            for i in range(30)
+        ]
+        + [SophisticatedFeature(category="custom_cursor", name="c", selector=".c", description="d")]
+    )
+    ds = crawler.synthesize_design_system({"https://example.com/": bp})
+    cats = [f.category for f in ds.sophisticated_features]
+    assert cats.count("marquee_stream") == MAX_FEATURES_PER_CATEGORY
+    assert cats.count("custom_cursor") == 1

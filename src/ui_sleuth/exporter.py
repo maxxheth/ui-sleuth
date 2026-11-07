@@ -903,6 +903,19 @@ def generate_site_design_system_markdown(crawl_result: MultiPageCrawlResult) -> 
     return "\n".join(lines)
 
 
+_ENDPOINT_LABEL_RE = re.compile(r"^(primary|secondary) \(")
+
+
+def count_proxy_endpoints(crawl_result: MultiPageCrawlResult) -> dict[str, int]:
+    """Pages per Decodo endpoint, from each page's ``proxy_used`` label (empty if none)."""
+    counts: dict[str, int] = {}
+    for blueprint in crawl_result.pages.values():
+        match = _ENDPOINT_LABEL_RE.match(blueprint.metadata.proxy_used or "")
+        if match:
+            counts[match.group(1)] = counts.get(match.group(1), 0) + 1
+    return counts
+
+
 def export_site_design_system(
     crawl_result: MultiPageCrawlResult,
     output_dir: str | Path,
@@ -926,7 +939,7 @@ def export_site_design_system(
 
         # manifest.json
         manifest_file = out_path / "manifest.json"
-        manifest_data = {
+        manifest_data: dict[str, Any] = {
             "entry_url": ds.entry_url,
             "domain": ds.domain,
             "total_pages_crawled": ds.total_pages_crawled,
@@ -934,6 +947,9 @@ def export_site_design_system(
             "pages": [p.model_dump() for p in ds.pages],
             "failed_pages": [fp.model_dump() for fp in crawl_result.failed_pages],
         }
+        endpoint_counts = count_proxy_endpoints(crawl_result)
+        if endpoint_counts:
+            manifest_data["proxy_endpoints"] = endpoint_counts
         manifest_file.write_text(json.dumps(manifest_data, indent=2), encoding="utf-8")
         saved_paths["manifest_json"] = manifest_file
 

@@ -20,7 +20,12 @@ from ui_sleuth._version import __version__
 from ui_sleuth.crawler import SiteCrawler
 from ui_sleuth.exporter import export_blueprint, export_site_design_system
 from ui_sleuth.log_redaction import install_scrapling_log_redaction
-from ui_sleuth.proxy_manager import ProxyConfig, ProxyConfigError, resolve_proxy_config
+from ui_sleuth.proxy_manager import (
+    DecodoStrategy,
+    ProxyConfig,
+    ProxyConfigError,
+    resolve_proxy_config,
+)
 from ui_sleuth.scrapling_engine import ScraplingEngine
 
 app = typer.Typer(
@@ -136,6 +141,18 @@ DecodoOpt = Annotated[
         help="Use Decodo settings from DECODO_* env/.env (errors if unusable)",
     ),
 ]
+DecodoStrategyOpt = Annotated[
+    DecodoStrategy | None,
+    typer.Option(
+        "--decodo-strategy",
+        envvar="UI_SLEUTH_DECODO_STRATEGY",
+        show_envvar=True,
+        case_sensitive=False,
+        help="With a secondary Decodo endpoint: 'pool' (rotate across both, default) or "
+        "'failover' (primary only until a proxy error, then secondary). "
+        "Falls back to DECODO_STRATEGY",
+    ),
+]
 ProxyEnvOpt = Annotated[
     bool,
     typer.Option(
@@ -163,11 +180,15 @@ def _resolve_proxy_or_exit(
     decodo: bool,
     proxy_env: bool,
     no_proxy: bool,
+    decodo_strategy: DecodoStrategy | None = None,
 ) -> ProxyConfig:
     """Resolve proxy options; print a credential-free error and exit 1 on failure.
 
     Options given on the command line win over UI_SLEUTH_* environment values: if any
     proxy option came from the command line, all environment-sourced ones are dropped.
+    ``decodo_strategy`` is a modifier, not a proxy source: it is not part of that check
+    (CLI beats ``UI_SLEUTH_DECODO_STRATEGY`` through Click; ``DECODO_STRATEGY`` is the
+    fallback inside ``resolve_proxy_config``).
     """
     values: dict[str, Any] = {
         "proxy": proxy,
@@ -198,6 +219,7 @@ def _resolve_proxy_or_exit(
             enable_decodo=values["decodo"],
             use_env=values["proxy_env"],
             no_proxy=values["no_proxy"],
+            decodo_strategy=decodo_strategy,
         )
     except ProxyConfigError as e:
         console.print(f"[bold red]Proxy configuration error:[/bold red] {escape(str(e))}")
@@ -389,6 +411,7 @@ def extract(
     proxy: ProxyOpt = None,
     proxy_file: ProxyFileOpt = None,
     decodo: DecodoOpt = False,
+    decodo_strategy: DecodoStrategyOpt = None,
     proxy_env: ProxyEnvOpt = False,
     no_proxy: NoProxyOpt = False,
     stealth: Annotated[
@@ -487,6 +510,7 @@ def extract(
         decodo=decodo,
         proxy_env=proxy_env,
         no_proxy=no_proxy,
+        decodo_strategy=decodo_strategy,
     )
 
     # Multi-page crawl activation
@@ -666,6 +690,7 @@ def crawl(
     proxy: ProxyOpt = None,
     proxy_file: ProxyFileOpt = None,
     decodo: DecodoOpt = False,
+    decodo_strategy: DecodoStrategyOpt = None,
     proxy_env: ProxyEnvOpt = False,
     no_proxy: NoProxyOpt = False,
     stealth: Annotated[
@@ -742,6 +767,7 @@ def crawl(
         decodo=decodo,
         proxy_env=proxy_env,
         no_proxy=no_proxy,
+        decodo_strategy=decodo_strategy,
     )
 
     _execute_multi_page_crawl(

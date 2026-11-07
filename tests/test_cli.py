@@ -45,6 +45,13 @@ _PROXY_ENV = (
     "UI_SLEUTH_DECODO",
     "UI_SLEUTH_PROXY_ENV",
     "UI_SLEUTH_NO_PROXY",
+    "UI_SLEUTH_DECODO_STRATEGY",
+    "DECODO_STRATEGY",
+    "DECODO_SECONDARY_HOST",
+    "DECODO_SECONDARY_USERNAME",
+    "DECODO_SECONDARY_PASSWORD",
+    "DECODO_SECONDARY_PORT_START",
+    "DECODO_SECONDARY_PORT_END",
 )
 
 
@@ -312,3 +319,88 @@ def test_help_shows_proxy_env_vars():
             "UI_SLEUTH_NO_PROXY",
         ):
             assert name in result.stdout
+
+
+_SECONDARY = {
+    "DECODO_SECONDARY_HOST": "203.0.113.7",
+    "DECODO_SECONDARY_USERNAME": "user2",
+    "DECODO_SECONDARY_PASSWORD": "secretpw2",
+    "DECODO_SECONDARY_PORT_START": "10001",
+    "DECODO_SECONDARY_PORT_END": "10002",
+}
+
+
+def _two_endpoints(monkeypatch):
+    _clean(monkeypatch)
+    for k, v in {**_DECODO_CREDS, **_SECONDARY}.items():
+        monkeypatch.setenv(k, v)
+
+
+def test_cli_decodo_strategy_overrides_env_strategy(monkeypatch):
+    _two_endpoints(monkeypatch)
+    monkeypatch.setenv("UI_SLEUTH_DECODO", "1")
+    monkeypatch.setenv("UI_SLEUTH_DECODO_STRATEGY", "pool")
+    seen = _fake_engine(monkeypatch)
+    result = runner.invoke(app, ["extract", "https://example.com", "--decodo-strategy", "failover"])
+    assert result.exit_code == 0, result.stdout
+    assert seen["proxy_config"].strategy == "failover"
+    assert seen["proxy_config"].can_fail_over
+    assert "secretpw" not in result.stdout
+
+
+def test_crawl_decodo_strategy_overrides_env_strategy(monkeypatch):
+    from ui_sleuth import cli
+
+    _two_endpoints(monkeypatch)
+    monkeypatch.setenv("UI_SLEUTH_DECODO", "1")
+    monkeypatch.setenv("UI_SLEUTH_DECODO_STRATEGY", "pool")
+    seen = {}
+    monkeypatch.setattr(cli, "_execute_multi_page_crawl", lambda **kw: seen.update(kw))
+    result = runner.invoke(app, ["crawl", "https://example.com", "--decodo-strategy", "FAILOVER"])
+    assert result.exit_code == 0, result.stdout
+    assert seen["proxy_cfg"].strategy == "failover"
+
+
+def test_cli_env_strategy_and_dotenv_style_fallback(monkeypatch):
+    _two_endpoints(monkeypatch)
+    monkeypatch.setenv("UI_SLEUTH_DECODO", "1")
+    monkeypatch.setenv("UI_SLEUTH_DECODO_STRATEGY", "failover")
+    seen = _fake_engine(monkeypatch)
+    assert runner.invoke(app, ["extract", "https://example.com"]).exit_code == 0
+    assert seen["proxy_config"].strategy == "failover"
+
+    monkeypatch.delenv("UI_SLEUTH_DECODO_STRATEGY")
+    monkeypatch.setenv("DECODO_STRATEGY", "failover")  # what .env would provide
+    assert runner.invoke(app, ["extract", "https://example.com"]).exit_code == 0
+    assert seen["proxy_config"].strategy == "failover"
+
+    monkeypatch.delenv("DECODO_STRATEGY")
+    assert runner.invoke(app, ["extract", "https://example.com"]).exit_code == 0
+    assert seen["proxy_config"].strategy == "pool"
+
+
+def test_cli_strategy_alone_does_not_drop_env_decodo(monkeypatch):
+    _two_endpoints(monkeypatch)
+    monkeypatch.setenv("UI_SLEUTH_DECODO", "1")
+    seen = _fake_engine(monkeypatch)
+    result = runner.invoke(app, ["extract", "https://example.com", "--decodo-strategy", "pool"])
+    assert result.exit_code == 0, result.stdout
+    assert seen["proxy_config"].has_proxy
+    assert len(seen["proxy_config"].groups) == 2
+
+
+@pytest.mark.parametrize("command", ["extract", "crawl"])
+def test_cli_invalid_decodo_strategy_exits_nonzero(monkeypatch, command):
+    _two_endpoints(monkeypatch)
+    result = runner.invoke(
+        app, [command, "https://example.com", "--decodo", "--decodo-strategy", "sideways"]
+    )
+    assert result.exit_code != 0
+    assert "secretpw" not in result.output
+
+
+def test_help_shows_decodo_strategy():
+    for command in ("extract", "crawl"):
+        out = runner.invoke(app, [command, "--help"], env={"COLUMNS": "200"}).output
+        assert "--decodo-strategy" in out
+        assert "UI_SLEUTH_DECODO_STRATEGY" in out

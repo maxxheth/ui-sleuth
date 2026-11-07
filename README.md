@@ -139,6 +139,7 @@ Every proxy option can also be set from the environment or a `.env` file in the 
 | `--decodo` | `UI_SLEUTH_DECODO` | `1`/`0`, `true`/`false`, `yes`/`no` |
 | `--proxy-env` | `UI_SLEUTH_PROXY_ENV` | `1`/`0`, `true`/`false`, `yes`/`no` |
 | `--no-proxy` | `UI_SLEUTH_NO_PROXY` | `1`/`0`, `true`/`false`, `yes`/`no` |
+| `--decodo-strategy` | `UI_SLEUTH_DECODO_STRATEGY` | `pool` or `failover` (see below) |
 
 Precedence: command-line flags > `UI_SLEUTH_*` environment / `.env` > nothing (direct). If any proxy flag is given on the command line, all `UI_SLEUTH_*` proxy values are ignored (so `--no-proxy` forces a direct connection even with `UI_SLEUTH_DECODO=1` in `.env`). Conflicting values from the same source (for example `UI_SLEUTH_NO_PROXY=1` plus `UI_SLEUTH_DECODO=1`) still error. Only the names of environment-sourced options are logged, never their values.
 
@@ -164,6 +165,31 @@ DECODO_PORT_END=10010
 DECODO_PROXY_FILE="./decodo-proxies.txt"
 ```
 
+#### Secondary Decodo endpoint (pool or failover)
+
+`--decodo` can draw from a second Decodo host with its own credentials and port range. It is only read with `--decodo` and must be configured completely (host, username and password, otherwise the command exits with an error naming the missing variables, never their values). A primary configuration is required.
+
+```env
+DECODO_SECONDARY_HOST="203.0.113.7"        # hostname, IPv4 or IPv6
+DECODO_SECONDARY_USERNAME="other_username"
+DECODO_SECONDARY_PASSWORD="other_password"
+DECODO_SECONDARY_PORT_START=10001          # optional, default 10001
+DECODO_SECONDARY_PORT_END=10010            # optional, default 10010
+```
+
+Two strategies decide how the endpoints are combined:
+
+- `pool` (default): both port ranges join one rotating pool, alternating hosts on every page attempt.
+- `failover`: only the primary is used. When a page fails with a proxy error after Scrapling's own retries, the engine switches to the secondary and re-fetches that page once. The switch is **sticky**: the rest of the crawl stays on the secondary (no fail-back). Non-proxy errors (timeouts, HTTP errors) never trigger failover.
+
+```bash
+uv run ui-sleuth crawl https://example.com --decodo --decodo-strategy failover
+```
+
+Strategy precedence: `--decodo-strategy` > `UI_SLEUTH_DECODO_STRATEGY` > `DECODO_STRATEGY` (in `.env`) > `pool`. The strategy is a modifier, not a proxy source: giving `--decodo-strategy` alone does not drop an environment-sourced `UI_SLEUTH_DECODO=1`. An invalid value exits with an error. With only one Decodo endpoint configured the strategy has no effect.
+
+Each page's `metadata.proxy_used` names the endpoint that served it (for example `secondary (203.0.113.7:10003)`, never credentials), a failover adds a `proxy_failover: primary -> secondary` entry to that page's `metadata.warnings`, and `manifest.json` gets `"proxy_endpoints": {"primary": 7, "secondary": 3}` page counts.
+
 ### Stealth Mode (Cloudflare Turnstile Bypass)
 ```bash
 uv run ui-sleuth extract https://protected-site.com --stealth
@@ -187,6 +213,7 @@ Options:
       --proxy <str>             Single proxy (scheme://user:pass@host:port, user:pass@host:port, host:port:user:pass, host:port)
       --proxy-file <str>        Path to text file with one proxy per line
       --decodo                  Use DECODO_* settings (errors if unusable)
+      --decodo-strategy TEXT    pool (default) or failover with a secondary endpoint
       --proxy-env               Use PROXY_FILE / HTTPS_PROXY / HTTP_PROXY from the environment
       --no-proxy                Force a direct connection
       --stealth                 Use StealthyFetcher to bypass Cloudflare
@@ -219,6 +246,7 @@ Options:
       --proxy <str>             Single proxy (scheme://user:pass@host:port, user:pass@host:port, host:port:user:pass, host:port)
       --proxy-file <str>        Path to text file with one proxy per line
       --decodo                  Use DECODO_* settings (errors if unusable)
+      --decodo-strategy TEXT    pool (default) or failover with a secondary endpoint
       --proxy-env               Use PROXY_FILE / HTTPS_PROXY / HTTP_PROXY from the environment
       --no-proxy                Force a direct connection
       --stealth                 Use StealthyFetcher to bypass Cloudflare

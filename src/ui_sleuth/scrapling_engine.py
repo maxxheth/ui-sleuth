@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING, Any
 from urllib.parse import urlparse
 
 from scrapling import DynamicFetcher, StealthyFetcher
+from scrapling.engines.toolbelt.proxy_rotation import is_proxy_error
 from scrapling.fetchers import DynamicSession, StealthySession
 
 from ui_sleuth.asset_inspector import (
@@ -169,6 +170,21 @@ async ({ maxMs = 15000, maxSteps = 80, maxHeight = 40000 } = {}) => {
     window.dispatchEvent(new Event('resize'));
 }
 """
+
+
+def is_proxy_failure(error: Exception) -> bool:
+    """True if a fetch error means the proxy itself failed.
+
+    Extends Scrapling's ``is_proxy_error``: Google Chrome (``real_chrome``) reports an
+    unreachable or refusing proxy as ``net::ERR_BLOCKED_BY_CLIENT`` on the main navigation
+    rather than ``ERR_PROXY_CONNECTION_FAILED``. Callers only consult this when a proxy is
+    configured, and ui-sleuth never blocks the target domain itself, so a blocked
+    ``Page.goto`` is attributed to the proxy.
+    """
+    if is_proxy_error(error):
+        return True
+    message = str(error).lower()
+    return "net::err_blocked_by_client" in message and "page.goto" in message
 
 
 def is_loopback_url(url: str) -> bool:
@@ -425,18 +441,36 @@ class ScraplingEngine:
         else:
             fetch_kwargs.update(self.proxy_config.to_scrapling_kwargs())
 
-        # Execute Scrapling fetch
-        try:
+        def fetch_once() -> Any:
             if self.session is not None:
                 try:
-                    response = self.session.fetch(self.url, **fetch_kwargs)
+                    return self.session.fetch(self.url, **fetch_kwargs)
                 finally:
                     # Pooled tabs would keep listeners/init scripts from this page
                     close_pages = getattr(self.session, "close_pages", None)
                     if callable(close_pages):
                         close_pages()
-            else:
-                response = fetcher_cls.fetch(self.url, **fetch_kwargs)
+            return fetcher_cls.fetch(self.url, **fetch_kwargs)
+
+        # Execute Scrapling fetch (one re-fetch on the next Decodo endpoint after a proxy
+        # error, when failover is configured; _page_setup resets state for each attempt)
+        failover_note: str | None = None
+        try:
+            try:
+                response = fetch_once()
+            except Exception as first_error:
+                if not (
+                    is_proxy_failure(first_error)
+                    and self.proxy_config.can_fail_over
+                    and not (self.session is None and is_loopback_url(self.url))
+                ):
+                    raise
+                before = self.proxy_config.active_label
+                if not self.proxy_config.fail_over():
+                    raise
+                failover_note = f"proxy_failover: {before} -> {self.proxy_config.active_label}"
+                logger.warning("Proxy error on %s; retrying once on the next endpoint", self.url)
+                response = fetch_once()
             final_url = getattr(response, "url", None)
             self.final_url = final_url if isinstance(final_url, str) else None
             status_code = getattr(response, "status", 200)
@@ -450,6 +484,12 @@ class ScraplingEngine:
         except Exception as e:
             logger.error("Scrapling fetch failed for %s: %s", self.url, e)
             raise
+        if failover_note:
+            self._action_data.setdefault("warnings", []).append(failover_note)
+
+        meta = getattr(response, "meta", None)
+        used_proxy = meta.get("proxy") if isinstance(meta, dict) else None
+        proxy_label = self.proxy_config.endpoint_for(used_proxy)
 
         # 1. Structural DOM Pruning & Repetitive Pattern Recognition
         landmarks = prune_and_map_dom(html_text)
@@ -471,7 +511,7 @@ class ScraplingEngine:
             timestamp=now_iso,
             status_code=status_code,
             wait_condition_used=self.wait_until,
-            proxy_used=self.proxy_config.get_display_summary(),
+            proxy_used=proxy_label or self.proxy_config.get_display_summary(),
             warnings=list(self._action_data.get("warnings", [])),
         )
 

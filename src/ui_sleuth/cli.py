@@ -6,7 +6,7 @@ import logging
 import re
 from enum import StrEnum
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Any
 from urllib.parse import urlparse
 
 import typer
@@ -104,21 +104,98 @@ def setup_logging(verbose: bool = False) -> None:
     )
 
 
+_PROXY_PARAMS = ("proxy", "proxy_file", "decodo", "proxy_env", "no_proxy")
+
+ProxyOpt = Annotated[
+    str | None,
+    typer.Option(
+        "--proxy",
+        envvar="UI_SLEUTH_PROXY",
+        show_envvar=True,
+        help="Single proxy (scheme://user:pass@host:port, user:pass@host:port, "
+        "host:port:user:pass or host:port)",
+    ),
+]
+ProxyFileOpt = Annotated[
+    str | None,
+    typer.Option(
+        "--proxy-file",
+        envvar="UI_SLEUTH_PROXY_FILE",
+        show_envvar=True,
+        help="Path to text file with one proxy per line (same formats)",
+    ),
+]
+DecodoOpt = Annotated[
+    bool,
+    typer.Option(
+        "--decodo",
+        envvar="UI_SLEUTH_DECODO",
+        show_envvar=True,
+        help="Use Decodo settings from DECODO_* env/.env (errors if unusable)",
+    ),
+]
+ProxyEnvOpt = Annotated[
+    bool,
+    typer.Option(
+        "--proxy-env",
+        envvar="UI_SLEUTH_PROXY_ENV",
+        show_envvar=True,
+        help="Use PROXY_FILE / HTTPS_PROXY / HTTP_PROXY from the environment",
+    ),
+]
+NoProxyOpt = Annotated[
+    bool,
+    typer.Option(
+        "--no-proxy",
+        envvar="UI_SLEUTH_NO_PROXY",
+        show_envvar=True,
+        help="Force a direct connection (no proxy)",
+    ),
+]
+
+
 def _resolve_proxy_or_exit(
+    ctx: typer.Context,
     proxy: str | None,
     proxy_file: str | None,
     decodo: bool,
     proxy_env: bool,
     no_proxy: bool,
 ) -> ProxyConfig:
-    """Resolve proxy options; print a credential-free error and exit 1 on failure."""
+    """Resolve proxy options; print a credential-free error and exit 1 on failure.
+
+    Options given on the command line win over UI_SLEUTH_* environment values: if any
+    proxy option came from the command line, all environment-sourced ones are dropped.
+    """
+    values: dict[str, Any] = {
+        "proxy": proxy,
+        "proxy_file": proxy_file,
+        "decodo": decodo,
+        "proxy_env": proxy_env,
+        "no_proxy": no_proxy,
+    }
+    # Compare by enum name: Typer may vendor its own Click, so ParameterSource isn't importable
+    # from a single stable place.
+    sources = {n: getattr(ctx.get_parameter_source(n), "name", None) for n in _PROXY_PARAMS}
+    from_env = [n for n, src in sources.items() if src == "ENVIRONMENT"]
+    log = logging.getLogger(__name__)
+    if any(src == "COMMANDLINE" for src in sources.values()):
+        for n in from_env:
+            values[n] = None if n in ("proxy", "proxy_file") else False
+        if from_env:
+            log.info(
+                "Ignoring environment proxy options overridden by the command line: %s",
+                ", ".join(from_env),
+            )
+    elif from_env:
+        log.info("Proxy options taken from the environment/.env: %s", ", ".join(from_env))
     try:
         cfg = resolve_proxy_config(
-            proxy=proxy,
-            proxy_file=proxy_file,
-            enable_decodo=decodo,
-            use_env=proxy_env,
-            no_proxy=no_proxy,
+            proxy=values["proxy"],
+            proxy_file=values["proxy_file"],
+            enable_decodo=values["decodo"],
+            use_env=values["proxy_env"],
+            no_proxy=values["no_proxy"],
         )
     except ProxyConfigError as e:
         console.print(f"[bold red]Proxy configuration error:[/bold red] {escape(str(e))}")
@@ -269,6 +346,7 @@ def _execute_multi_page_crawl(
 
 @app.command()
 def extract(
+    ctx: typer.Context,
     url: Annotated[
         str | None,
         typer.Argument(help="Target website URL to reverse-engineer"),
@@ -306,37 +384,11 @@ def extract(
         str,
         typer.Option("--viewport", help="Emulated viewport dimensions (WIDTHxHEIGHT)"),
     ] = "1440x900",
-    proxy: Annotated[
-        str | None,
-        typer.Option(
-            "--proxy",
-            help="Single proxy (scheme://user:pass@host:port, user:pass@host:port, "
-            "host:port:user:pass or host:port)",
-        ),
-    ] = None,
-    proxy_file: Annotated[
-        str | None,
-        typer.Option(
-            "--proxy-file", help="Path to text file with one proxy per line (same formats)"
-        ),
-    ] = None,
-    decodo: Annotated[
-        bool,
-        typer.Option(
-            "--decodo",
-            help="Use Decodo settings from DECODO_* env/.env (errors if unusable)",
-        ),
-    ] = False,
-    proxy_env: Annotated[
-        bool,
-        typer.Option(
-            "--proxy-env", help="Use PROXY_FILE / HTTPS_PROXY / HTTP_PROXY from the environment"
-        ),
-    ] = False,
-    no_proxy: Annotated[
-        bool,
-        typer.Option("--no-proxy", help="Force a direct connection (no proxy)"),
-    ] = False,
+    proxy: ProxyOpt = None,
+    proxy_file: ProxyFileOpt = None,
+    decodo: DecodoOpt = False,
+    proxy_env: ProxyEnvOpt = False,
+    no_proxy: NoProxyOpt = False,
     stealth: Annotated[
         bool,
         typer.Option(
@@ -427,6 +479,7 @@ def extract(
         output = _default_output_dir(target_url)
 
     proxy_cfg = _resolve_proxy_or_exit(
+        ctx,
         proxy=proxy,
         proxy_file=proxy_file,
         decodo=decodo,
@@ -555,6 +608,7 @@ def extract(
 
 @app.command()
 def crawl(
+    ctx: typer.Context,
     url: Annotated[
         str | None,
         typer.Argument(help="Target website URL to crawl"),
@@ -607,37 +661,11 @@ def crawl(
         str,
         typer.Option("--viewport", help="Emulated viewport dimensions (WIDTHxHEIGHT)"),
     ] = "1440x900",
-    proxy: Annotated[
-        str | None,
-        typer.Option(
-            "--proxy",
-            help="Single proxy (scheme://user:pass@host:port, user:pass@host:port, "
-            "host:port:user:pass or host:port)",
-        ),
-    ] = None,
-    proxy_file: Annotated[
-        str | None,
-        typer.Option(
-            "--proxy-file", help="Path to text file with one proxy per line (same formats)"
-        ),
-    ] = None,
-    decodo: Annotated[
-        bool,
-        typer.Option(
-            "--decodo",
-            help="Use Decodo settings from DECODO_* env/.env (errors if unusable)",
-        ),
-    ] = False,
-    proxy_env: Annotated[
-        bool,
-        typer.Option(
-            "--proxy-env", help="Use PROXY_FILE / HTTPS_PROXY / HTTP_PROXY from the environment"
-        ),
-    ] = False,
-    no_proxy: Annotated[
-        bool,
-        typer.Option("--no-proxy", help="Force a direct connection (no proxy)"),
-    ] = False,
+    proxy: ProxyOpt = None,
+    proxy_file: ProxyFileOpt = None,
+    decodo: DecodoOpt = False,
+    proxy_env: ProxyEnvOpt = False,
+    no_proxy: NoProxyOpt = False,
     stealth: Annotated[
         bool,
         typer.Option(
@@ -706,6 +734,7 @@ def crawl(
         output = _default_output_dir(target_url)
 
     proxy_cfg = _resolve_proxy_or_exit(
+        ctx,
         proxy=proxy,
         proxy_file=proxy_file,
         decodo=decodo,

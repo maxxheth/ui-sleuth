@@ -130,6 +130,27 @@ uv run ui-sleuth extract https://example.com --no-proxy
 
 Precedence when several are given: `--no-proxy` (cannot be combined with others) > `--proxy` > `--proxy-file` > `--decodo` > `--proxy-env`. Proxies without a scheme are normalized to `http://user:pass@host:port`; an explicit scheme (`socks5://`, `https://`) is preserved. Unparseable proxy-file lines abort with the file and line number (never the content). If `--decodo` (or `--proxy-env`) cannot produce a usable proxy (missing credentials, `DECODO_PORT_START` > `DECODO_PORT_END`, ...), the command exits with an error instead of silently connecting directly. Passwords are always redacted in output and logs. Loopback targets (`localhost`, `*.localhost`, `127.0.0.0/8`, `::1`) bypass the proxy, and this is logged at INFO.
 
+Every proxy option can also be set from the environment or a `.env` file in the current directory:
+
+| Option | Environment variable | Value |
+|---|---|---|
+| `--proxy` | `UI_SLEUTH_PROXY` | proxy string |
+| `--proxy-file` | `UI_SLEUTH_PROXY_FILE` | path |
+| `--decodo` | `UI_SLEUTH_DECODO` | `1`/`0`, `true`/`false`, `yes`/`no` |
+| `--proxy-env` | `UI_SLEUTH_PROXY_ENV` | `1`/`0`, `true`/`false`, `yes`/`no` |
+| `--no-proxy` | `UI_SLEUTH_NO_PROXY` | `1`/`0`, `true`/`false`, `yes`/`no` |
+
+Precedence: command-line flags > `UI_SLEUTH_*` environment / `.env` > nothing (direct). If any proxy flag is given on the command line, all `UI_SLEUTH_*` proxy values are ignored (so `--no-proxy` forces a direct connection even with `UI_SLEUTH_DECODO=1` in `.env`). Conflicting values from the same source (for example `UI_SLEUTH_NO_PROXY=1` plus `UI_SLEUTH_DECODO=1`) still error. Only the names of environment-sourced options are logged, never their values.
+
+Example `.env` that enables Decodo for every run:
+```env
+UI_SLEUTH_DECODO=1
+DECODO_USERNAME="your_username"
+DECODO_PASSWORD="your_password"
+DECODO_PORT_START=10001
+DECODO_PORT_END=10010
+```
+
 Environment variables read only with `--decodo`, in `.env`:
 ```env
 DECODO_PROXY_URL="http://your_username:your_password@isp.decodo.com:10001"

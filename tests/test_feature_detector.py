@@ -3,7 +3,7 @@
 from unittest.mock import MagicMock
 
 from ui_sleuth.exporter import generate_llm_markdown
-from ui_sleuth.feature_detector import detect_and_explore_features
+from ui_sleuth.feature_detector import MAX_FEATURES_PER_CATEGORY, detect_and_explore_features
 from ui_sleuth.models import (
     DesignTokens,
     SiteBlueprint,
@@ -267,3 +267,76 @@ def test_non_dict_probe_result_returns_empty_summary():
     page = MagicMock()
     page.evaluate.return_value = None
     assert detect_and_explore_features(page).features == []
+
+
+def test_no_feature_reports_explored_and_explore_flag_is_noop():
+    probe = {
+        "detected_engines": ["GSAP (GreenSock)"],
+        "sticky_tracks": [{"selector": ".s", "dimensions": {"height": 2000}}],
+        "offscreen_drawers": [{"selector": ".d"}],
+        "disclosures": [{"selector": ".a"}],
+        "marquees": [{"selector": ".m"}],
+        "canvases": [{"selector": "canvas", "name": "2D Dynamic Canvas"}],
+        "magnetic_elements": [{"selector": "[data-magnetic]"}],
+        "custom_cursors": [{"selector": "body"}],
+        "typographic_reveals": [{"selector": "h1"}],
+        "hover_media_switchers": [{"trigger_selector": "[data-video]"}],
+        "scroll_parallaxes": [{"selector": "[data-move]"}],
+    }
+    for explore in (True, False):
+        page = MagicMock()
+        page.evaluate.return_value = probe
+        summary = detect_and_explore_features(page, explore=explore)
+        assert len(summary.features) == 11
+        assert {f.exploration_status for f in summary.features} == {"detected"}
+
+
+def test_nested_marquee_nodes_are_capped_with_summary():
+    marquees = [{"selector": f"div.marquee-{i % 8}", "dimensions": {"top": i}} for i in range(50)]
+    page = MagicMock()
+    page.evaluate.return_value = {"marquees": marquees}
+    summary = detect_and_explore_features(page)
+    mq = [f for f in summary.features if f.category == "marquee_stream"]
+    assert len(mq) == MAX_FEATURES_PER_CATEGORY + 1  # cap + one "+N more" summary
+    kept, overflow = mq[:-1], mq[-1]
+    assert overflow.details["omitted"] == sum(1 for i in range(50) if i % 8 >= 5)
+    assert overflow.name.startswith("+")
+    assert sum(f.details["count"] for f in kept) + overflow.details["omitted"] == 50
+
+
+def test_same_selector_marquees_merge_into_one_with_count():
+    page = MagicMock()
+    page.evaluate.return_value = {"marquees": [{"selector": "div.m"} for _ in range(50)]}
+    summary = detect_and_explore_features(page)
+    assert len(summary.features) == 1
+    assert summary.features[0].details["count"] == 50
+
+
+def test_runbook_uses_detected_selectors_not_reference_site_ones():
+    page = MagicMock()
+    page.evaluate.return_value = {
+        "custom_cursors": [{"selector": "body", "element_detected": False}],
+        "hover_media_switchers": [{"trigger_selector": "li.row[data-video]"}],
+        "magnetic_elements": [{"selector": "a.cta[data-magnetic]"}],
+        "typographic_reveals": [{"selector": "h2.title"}],
+    }
+    summary = detect_and_explore_features(page)
+    md = generate_llm_markdown(
+        SiteBlueprint(
+            metadata=SiteMetadata(url="https://x.test", timestamp="2026-01-01T00:00:00Z"),
+            tokens=DesignTokens(),
+            sophisticated_features=summary,
+        )
+    )
+    for hardcoded in (".cursor-wrap", ".cursor-img", "#hero-active-video", ".hero-visual"):
+        assert hardcoded not in md
+    assert '"li.row[data-video]"' in md
+    assert '"a.cta[data-magnetic]"' in md
+    assert '"h2.title"' in md
+    assert "not detected: pass your preview" in md
+    # Detected target selector is used when reported
+    page.evaluate.return_value = {
+        "hover_media_switchers": [{"trigger_selector": "li.row", "target_selector": "#preview"}],
+    }
+    summary = detect_and_explore_features(page)
+    assert summary.features[0].details["target_selector"] == "#preview"

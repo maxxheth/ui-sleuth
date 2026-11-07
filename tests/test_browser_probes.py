@@ -124,3 +124,39 @@ def test_transfer_control_to_offscreen_is_tagged(browser_page: Any) -> None:
     browser_page.evaluate("document.getElementById('c').transferControlToOffscreen()")
     asset_probe = browser_page.evaluate(CANVAS_VIDEO_PROBE_JS)
     assert asset_probe["canvases"][0]["context_type"] == "offscreen"
+
+
+NESTED_MARQUEE_HTML = """
+<div class="logo-marquee"><div class="marquee-track">
+  <div class="marquee-item">a</div><div class="marquee-item">b</div>
+  <div class="marquee-item">c</div></div></div>
+<div class="faq-accordion"><div class="accordion-item" aria-expanded="false">q1</div>
+  <div class="accordion-item" aria-expanded="false">q2</div></div>
+<div data-framer-name="Hero"><span data-magnetic>x</span><a class="magnetic-btn">y</a></div>
+"""
+
+
+def test_marquees_and_disclosures_are_outermost_only(browser_page: Any) -> None:
+    browser_page.set_content("<html><body></body></html>")
+    browser_page.evaluate("html => { document.body.innerHTML = html; }", NESTED_MARQUEE_HTML)
+    probe = browser_page.evaluate(PROBE_SOPHISTICATED_FEATURES_JS)
+    assert [m["selector"] for m in probe["marquees"]] == ["div.logo-marquee"]
+    assert [d["selector"] for d in probe["disclosures"]] == ["div.faq-accordion"]
+    assert probe["detected_engines"] == ["Framer (site builder)"]
+    # Selector derives from the attribute that matched, and matches the element.
+    assert probe["magnetic_elements"][0]["selector"] == "span[data-magnetic]"
+    assert browser_page.query_selector(probe["magnetic_elements"][0]["selector"]) is not None
+    assert all("hero-visual" not in str(v) for v in probe["hover_media_switchers"])
+
+
+def test_news_overlay_requires_whole_token(browser_page: Any) -> None:
+    links = "".join(f"<a href='#'>l{i}</a>" for i in range(5))
+    html = (
+        f"<div class='newsletter-box' style='position:fixed;display:none'>{links}</div>"
+        f"<div class='news-panel' style='position:fixed;display:none'>{links}</div>"
+    )
+    browser_page.set_content("<html><body></body></html>")
+    browser_page.evaluate("html => { document.body.innerHTML = html; }", html)
+    names = _drawers(browser_page)
+    assert any("news-panel" in n for n in names)
+    assert not any("newsletter" in n for n in names)

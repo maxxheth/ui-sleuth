@@ -46,11 +46,13 @@
    - **Video Diagnostics**: Inspects playback flags (`autoplay`, `muted`, `loop`, `playsinline`) to distinguish decorative background loops from interactive players.
    - **Runtime Ecosystem Mapping**: Recommends modern React/Next.js wrappers (`@react-three/fiber`, `@rive-app/react-canvas`, `@splinetool/react-spline`, `@lottiefiles/react-lottie-player`).
 
-6. **Sophisticated Feature Detection & Exploration (`feature_detector.py`)**
+6. **Sophisticated Feature Detection (`feature_detector.py`)**
+   - Detection only: the page is probed read-only. Nothing is clicked, hovered or expanded, so every feature is reported as `detected`; hidden content that only appears after interaction is not captured. Interaction-based exploration is planned (`--explore` is reserved for it and is currently a no-op).
+   - Outermost matches only, grouped by selector with a `count`, and capped at 5 per category with a trailing `+N more` summary entry.
    - **Motion Runtimes**: Detects GSAP (ScrollTrigger, SplitText), Lenis smooth scrolling, Three.js, Rive, and Lottie.
    - **Sticky Tracks**: Identifies CSS and JS sticky scroll containers, pinning mechanics, and horizontal scroll tracks.
-   - **Off-Screen Drawers & Modals**: Detects hidden drawers/modals, triggers them open to evaluate active DOM state and extract copy/structure, and restores original layout.
-   - **Interactive Elements**: Inspects accordions, expandable FAQ modules, tabs, and marquees.
+   - **Off-Screen Drawers & Modals**: Detects hidden drawers/modals from computed style and reads the text already present in the DOM (they are not opened).
+   - **Interactive Elements**: Detects accordions, expandable FAQ modules, and marquees (not expanded).
 
 7. **Multimodal & Export Layer (`exporter.py`, `cli.py`)**
    - Full-page screenshots saved alongside blueprints (`--screenshot`), with progressive scrolling, texture clamp safeguards, and GSAP stabilization.
@@ -171,7 +173,7 @@ Options:
       --real-chrome / --no-real-chrome Use installed Google Chrome executable
   -d, --delay <float>           Post-load stabilization delay in seconds [default: 2.0]
       --auto-scroll / --no-auto-scroll Progressively scroll page to trigger lazy loading [default: auto-scroll]
-      --explore / --no-explore  Detect and independently explore sophisticated features [default: explore]
+      --explore / --no-explore  Reserved; currently a no-op (features are detected, not interacted with) [default: explore]
       --crawl                   Enable multi-page site crawl to gather component and layout evidence
   -m, --max-pages <int>         Maximum number of pages to crawl [default: 1 for single, 5 for crawl]
       --max-depth <int>         Maximum crawl link depth for internal link discovery [default: 2]
@@ -203,7 +205,7 @@ Options:
       --real-chrome / --no-real-chrome Use installed Google Chrome executable
   -d, --delay <float>           Post-load stabilization delay in seconds [default: 2.0]
       --auto-scroll / --no-auto-scroll Progressively scroll page to trigger lazy loading [default: auto-scroll]
-      --explore / --no-explore  Detect and independently explore sophisticated features [default: explore]
+      --explore / --no-explore  Reserved; currently a no-op (features are detected, not interacted with) [default: explore]
   -v, --verbose                 Enable verbose debug logging
       --help                    Show this message and exit.
 ```

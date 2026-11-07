@@ -332,7 +332,7 @@ def extract(
         bool,
         typer.Option(
             "--explore/--no-explore",
-            help="Detect and independently explore sophisticated interactive features, sticky tracks, and drawers",
+            help="Reserved for future interaction exploration; currently has no effect (features are always detected, never expanded or clicked)",
         ),
     ] = True,
     crawl: Annotated[
@@ -625,7 +625,7 @@ def crawl(
         bool,
         typer.Option(
             "--explore/--no-explore",
-            help="Detect and independently explore sophisticated interactive features, sticky tracks, and drawers",
+            help="Reserved for future interaction exploration; currently has no effect (features are always detected, never expanded or clicked)",
         ),
     ] = True,
     verbose: Annotated[

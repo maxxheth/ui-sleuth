@@ -100,9 +100,36 @@ def untrusted_block(payload: Any) -> list[str]:
     return [UNTRUSTED_NOTE, "", *fence(body, "json untrusted-page-content"), ""]
 
 
+def _ts_str(value: object) -> str:
+    """Render a scraped value as a double-quoted, single-line TypeScript string literal."""
+    return json.dumps(_collapse(value, 200), ensure_ascii=True)
+
+
+def _first_feature(
+    features: list[SophisticatedFeature], category: str
+) -> SophisticatedFeature | None:
+    return next(
+        (f for f in features if f.category == category and f.details.get("omitted") is None), None
+    )
+
+
 def render_kinetic_runbook(features: list[SophisticatedFeature]) -> list[str]:
     """Generates an actionable, copy-pasteable code runbook for detected kinetic micro-interactions."""
     categories = {f.category for f in features}
+    # Runbook parameters come from detected selectors only; nothing site-specific is assumed.
+    magnetic = _first_feature(features, "magnetic_physics")
+    magnetic_sel = _ts_str(magnetic.selector if magnetic else "[data-magnetic]")
+    cursor = _first_feature(features, "custom_cursor")
+    cursor_found = bool(cursor and cursor.details.get("element_detected"))
+    reveal_sels = [
+        f.selector
+        for f in features
+        if f.category == "typographic_reveal" and f.details.get("omitted") is None
+    ]
+    reveal_sel = _ts_str(", ".join(reveal_sels) if reveal_sels else "h1, h2")
+    media = _first_feature(features, "hover_media_switcher")
+    media_trigger = _ts_str(media.selector if media else "[data-video]")
+    media_target = media.details.get("target_selector") if media else None
     kinetic_categories = {
         "magnetic_physics",
         "custom_cursor",
@@ -127,7 +154,7 @@ def render_kinetic_runbook(features: list[SophisticatedFeature]) -> list[str]:
                 "#### 1. Magnetic Button Physics (Elastic Pointer Pull)",
                 "```typescript",
                 "// Elastic spring attraction: elements smoothly gravitate towards pointer coordinates",
-                "export function initMagneticElements(selector = '[data-magnetic]') {",
+                f"export function initMagneticElements(selector = {magnetic_sel}) {{",
                 "  const elements = document.querySelectorAll<HTMLElement>(selector);",
                 "  elements.forEach((el) => {",
                 "    const strength = parseFloat(el.dataset.magnetic || '20');",
@@ -158,9 +185,22 @@ def render_kinetic_runbook(features: list[SophisticatedFeature]) -> list[str]:
                 "```typescript",
                 "// Fixed pointer follower with lerp coordinates, hover scaling, and floating image card",
                 "export function initCustomCursor() {",
-                "  const cursor = document.querySelector<HTMLElement>('.cursor-wrap');",
-                "  const previewImg = document.querySelector<HTMLImageElement>('.cursor-img');",
-                "  if (!cursor) return;",
+                *(
+                    [
+                        f"  const cursor = document.querySelector<HTMLElement>({_ts_str(cursor.selector)});",
+                        "  const previewImg = cursor?.querySelector<HTMLImageElement>('img') ?? null;",
+                        "  if (!cursor) return;",
+                    ]
+                    if cursor and cursor_found
+                    else [
+                        "  // No cursor element was detected on the page: create the follower.",
+                        "  const cursor = document.createElement('div');",
+                        "  cursor.className = 'custom-cursor';",
+                        "  document.body.appendChild(cursor);",
+                        "  const previewImg = document.createElement('img');",
+                        "  cursor.appendChild(previewImg);",
+                    ]
+                ),
                 "",
                 "  let mouseX = 0, mouseY = 0;",
                 "  let cursorX = 0, cursorY = 0;",
@@ -210,7 +250,7 @@ def render_kinetic_runbook(features: list[SophisticatedFeature]) -> list[str]:
                 "#### 3. Typographic SplitText Cascade (Masked Entrance)",
                 "```typescript",
                 "// Staggered upward character / word reveals with overflow masking",
-                "export function initTypographicReveals(selector = '.split-text, h1, h2') {",
+                f"export function initTypographicReveals(selector = {reveal_sel}) {{",
                 "  const headings = document.querySelectorAll<HTMLElement>(selector);",
                 "  headings.forEach((heading) => {",
                 "    const words = (heading.textContent || '').trim().split(/\\s+/);",
@@ -254,8 +294,14 @@ def render_kinetic_runbook(features: list[SophisticatedFeature]) -> list[str]:
                 "```typescript",
                 "// Dynamically cross-fade and play preview media when hovering list items",
                 "export function initHoverMediaSwitcher(",
-                "  triggerSelector = '[data-video=\"to-play\"]',",
-                "  videoTargetSelector = '#hero-active-video'",
+                f"  triggerSelector = {media_trigger},",
+                *(
+                    [f"  videoTargetSelector = {_ts_str(media_target)}"]
+                    if isinstance(media_target, str) and media_target
+                    else [
+                        "  videoTargetSelector: string // not detected: pass your preview <video> selector"
+                    ]
+                ),
                 ") {",
                 "  const triggers = document.querySelectorAll<HTMLElement>(triggerSelector);",
                 "  const video = document.querySelector<HTMLVideoElement>(videoTargetSelector);",

@@ -13,6 +13,9 @@ from ui_sleuth.models import SophisticatedFeature, SophisticatedFeaturesSummary
 
 logger = logging.getLogger(__name__)
 
+# Per-category cap on reported features; the remainder is summarised in one "+N more" entry.
+MAX_FEATURES_PER_CATEGORY = 5
+
 PROBE_SOPHISTICATED_FEATURES_JS = """
 () => {
     const results = {
@@ -31,6 +34,36 @@ PROBE_SOPHISTICATED_FEATURES_JS = """
 
     const viewportHeight = window.innerHeight || 900;
     const viewportWidth = window.innerWidth || 1440;
+
+    const SAFE_CLASS = /^[A-Za-z_][\\w-]*$/;
+
+    // Selector built from the attribute that actually matched (falling back to a matching class
+    // token), so the reported selector always matches the element it was derived from.
+    function matchedSelector(el, attrs, classHint) {
+        const tag = el.tagName.toLowerCase();
+        for (const a of attrs) {
+            if (el.hasAttribute(a)) return `${tag}[${a}]`;
+        }
+        if (typeof el.className === 'string') {
+            const hit = el.className.split(/\\s+/).find(c => SAFE_CLASS.test(c) && c.includes(classHint));
+            if (hit) return `${tag}.${hit}`;
+        }
+        return makeElementSelector(el);
+    }
+
+    // Group elements by selector: first element supplies dimensions, `count` is the group size.
+    function groupBySelector(items) {
+        const groups = new Map();
+        for (const item of items) {
+            const existing = groups.get(item.selector);
+            if (existing) {
+                existing.count += 1;
+            } else {
+                groups.set(item.selector, Object.assign({ count: 1 }, item));
+            }
+        }
+        return Array.from(groups.values());
+    }
 
     function makeElementSelector(el) {
         if (!el || !el.tagName) return 'element';
@@ -82,7 +115,9 @@ PROBE_SOPHISTICATED_FEATURES_JS = """
         results.detected_engines.push('Lottie Animations');
     }
     if (document.querySelector('[data-framer-name], [data-framer-component]')) {
-        results.detected_engines.push('Framer Motion');
+        // data-framer-* attributes identify pages published by the Framer site builder; they say
+        // nothing about whether the Framer Motion library is used.
+        results.detected_engines.push('Framer (site builder)');
     }
 
     // 2. Sticky Scroll-Jacked / Pinned Scenes Detection
@@ -153,6 +188,8 @@ PROBE_SOPHISTICATED_FEATURES_JS = """
 
     // 3. Off-Screen Drawers, Modals & Floating Overlays
     const seenDrawers = new Set();
+    const drawerEls = new Set();
+    const drawerItems = [];
     for (const el of allEls) {
         const style = window.getComputedStyle(el);
         const rect = el.getBoundingClientRect();
@@ -170,13 +207,15 @@ PROBE_SOPHISTICATED_FEATURES_JS = """
             docTop > docHeight + viewportHeight || rect.left > viewportWidth || rect.right < 0 || docBottom < -100
         );
         const clsStr = (el.className && typeof el.className === 'string') ? el.className : '';
+        // Whole class tokens, so `newsletter` or `renewsletter` do not count as `news`.
+        const clsTokens = clsStr.split(/[-_\\s]+/).filter(Boolean);
         const hasOverlayClass = (
             clsStr.includes('modal') ||
             clsStr.includes('drawer') ||
-            clsStr.includes('news') ||
             clsStr.includes('popup') ||
             clsStr.includes('pop-') ||
-            /\b(nav|menu-overlay)\b/.test(clsStr)
+            clsTokens.includes('news') ||
+            /\\b(nav|menu-overlay)\\b/.test(clsStr)
         );
         const isHiddenMenuOverlay = (
             (style.position === 'fixed' || style.position === 'absolute') &&
@@ -200,13 +239,15 @@ PROBE_SOPHISTICATED_FEATURES_JS = """
 
             if (!seenDrawers.has(dedupeKey) && selector !== 'body' && selector !== 'html') {
                 seenDrawers.add(dedupeKey);
+                drawerEls.add(el);
                 const headings = Array.from(el.querySelectorAll('h1, h2, h3, [class*="title"], [class*="menu-link-item"]'))
                     .map(h => (h.innerText || h.textContent || '').trim().replace(/\\s+/g, ' '))
                     .filter(t => t.length > 0)
                     .slice(0, 8);
                 const textPreview = (el.innerText || el.textContent || '').trim().replace(/\\s+/g, ' ').slice(0, 150);
 
-                results.offscreen_drawers.push({
+                drawerItems.push({
+                    el: el,
                     name: `Modal/Drawer (${selector})`,
                     selector: selector,
                     dimensions: {
@@ -223,20 +264,30 @@ PROBE_SOPHISTICATED_FEATURES_JS = """
         }
     }
 
+    // Keep only the outermost drawer (nested drawers are parts of the same component).
+    const outerDrawers = drawerItems.filter(item => {
+        for (let p = item.el.parentElement; p; p = p.parentElement) {
+            if (drawerEls.has(p)) return false;
+        }
+        return true;
+    });
+    for (const g of groupBySelector(outerDrawers)) {
+        delete g.el;
+        results.offscreen_drawers.push(g);
+    }
+
     // 4. Interactive Disclosures & Accordions
-    const accordionTriggers = document.querySelectorAll(
-        'details, [aria-expanded], [class*="accordion"], [class*="dropdown"], .home-ser-item, [data-accordion]'
-    );
-    const seenAccordions = new Set();
+    const ACCORDION_SEL = 'details, [aria-expanded], [class*="accordion"], [class*="dropdown"], [data-accordion]';
+    const accordionTriggers = document.querySelectorAll(ACCORDION_SEL);
+    const disclosureItems = [];
     for (const el of accordionTriggers) {
+        if (el.parentElement && el.parentElement.closest(ACCORDION_SEL)) continue;
         const selector = makeElementSelector(el);
         const r = el.getBoundingClientRect();
-        const dedupeKey = el.id ? selector : `${selector}@${Math.round(r.top + window.scrollY)}`;
-        if (!seenAccordions.has(dedupeKey)) {
-            seenAccordions.add(dedupeKey);
+        {
             const titleEl = el.querySelector('summary, [class*="title"], [class*="head"], h1, h2, h3, h4');
             const title = titleEl ? (titleEl.innerText || '').trim() : '';
-            results.disclosures.push({
+            disclosureItems.push({
                 name: `Interactive Disclosure (${selector})`,
                 selector: selector,
                 title: title,
@@ -250,13 +301,18 @@ PROBE_SOPHISTICATED_FEATURES_JS = """
             });
         }
     }
+    results.disclosures.push(...groupBySelector(disclosureItems));
 
     // 5. Marquees & Continuous Tickers
-    const marquees = document.querySelectorAll('[class*="marquee"], [class*="ticker"], [class*="client-list"]');
+    const MARQUEE_SEL = '[class*="marquee"], [class*="ticker"], [class*="client-list"]';
+    const marquees = document.querySelectorAll(MARQUEE_SEL);
+    const marqueeItems = [];
     for (const el of marquees) {
+        // Outermost only: the track and every item inside a marquee match the same selector.
+        if (el.parentElement && el.parentElement.closest(MARQUEE_SEL)) continue;
         const selector = makeElementSelector(el);
         const r = el.getBoundingClientRect();
-        results.marquees.push({
+        marqueeItems.push({
             name: `Continuous Stream (${selector})`,
             selector: selector,
             dimensions: {
@@ -268,6 +324,7 @@ PROBE_SOPHISTICATED_FEATURES_JS = """
             description: `Infinite marquee or animated ticker stream containing logo/card repetitions.`
         });
     }
+    results.marquees.push(...groupBySelector(marqueeItems));
 
     // 6. Dynamic Canvases
     const canvases = document.querySelectorAll('canvas');
@@ -309,9 +366,7 @@ PROBE_SOPHISTICATED_FEATURES_JS = """
                     width: Math.round(r.width),
                     height: Math.round(r.height)
                 };
-                const tag = el.tagName.toLowerCase();
-                const cls = typeof el.className === 'string' ? el.className.split(/\\s+/)[0] : '';
-                sampleSelector = cls ? `${tag}.${cls}[data-magnetic]` : `${tag}[data-magnetic]`;
+                sampleSelector = matchedSelector(el, ['data-magnetic', 'data-magnetic-strength'], 'magnetic');
             }
             const txt = (el.innerText || el.getAttribute('aria-label') || '').trim();
             if (txt && sampleLabels.length < 5) {
@@ -355,13 +410,12 @@ PROBE_SOPHISTICATED_FEATURES_JS = """
             }
         });
 
-        let cursorSelector = '.cursor-wrap';
+        // Only report a cursor element selector when one was actually found.
+        let cursorSelector = cursorInteractiveEls.length > 0 ? '[data-cursor]' : 'body';
         let cursorRect = { top: 0, left: 0, width: 24, height: 24 };
         if (cursorEls.length > 0) {
             const first = cursorEls[0];
-            const tag = first.tagName.toLowerCase();
-            const cls = typeof first.className === 'string' ? first.className.split(/\\s+/)[0] : '';
-            cursorSelector = cls ? `${tag}.${cls}` : tag;
+            cursorSelector = makeElementSelector(first);
             const r = first.getBoundingClientRect();
             cursorRect = {
                 top: Math.round(r.top + window.scrollY),
@@ -373,6 +427,7 @@ PROBE_SOPHISTICATED_FEATURES_JS = """
 
         results.custom_cursors.push({
             selector: cursorSelector,
+            element_detected: cursorEls.length > 0,
             dimensions: cursorRect,
             states: Array.from(states),
             has_image_preview: previewCount > 0,
@@ -383,25 +438,26 @@ PROBE_SOPHISTICATED_FEATURES_JS = """
     }
 
     // 9. Typographic SplitText Reveals
-    const splitCandidates = document.querySelectorAll(
-        '.split-text, [data-split], .words, .chars, .lines, ' +
-        '.home-hero-title, .home-abt-title, .ser-hero-title, .ser-why-item-title, .projlist-title, ' +
-        'h1[class*="title"], h2[class*="title"]'
-    );
-    const seenSplit = new Set();
+    // Explicit split-text markers, plus generic headings that already contain split word/char/line spans.
+    const SPLIT_MARKERS = '.split-text, [data-split], .words, .chars, .lines';
+    const SPLIT_CHILDREN = '[class*="char"], [class*="word"], [class*="split"], [data-word], [data-char]';
+    const splitCandidates = Array.from(document.querySelectorAll(SPLIT_MARKERS + ', h1, h2, h3'))
+        .filter(el => el.matches(SPLIT_MARKERS) || el.querySelector(SPLIT_CHILDREN));
+    const seenSplit = new Map();
     splitCandidates.forEach(el => {
         const tag = el.tagName.toLowerCase();
-        const cls = typeof el.className === 'string' ? el.className.split(/\\s+/)[0] : '';
+        const cls = typeof el.className === 'string' ? el.className.split(/\\s+/).find(c => SAFE_CLASS.test(c)) : '';
         const selector = cls ? `${tag}.${cls}` : tag;
-        if (!seenSplit.has(selector) && seenSplit.size < 6) {
-            seenSplit.add(selector);
+        if (seenSplit.has(selector)) {
+            seenSplit.get(selector).count += 1;
+        } else if (seenSplit.size < 6) {
             const r = el.getBoundingClientRect();
             const txt = (el.innerText || '').trim().slice(0, 80).replace(/[\\r\\n]+/g, ' ');
             const hasNestedChars = el.querySelectorAll('.char, .chars, [class*="char"]').length > 0;
             const hasNestedWords = el.querySelectorAll('.word, .words, [class*="word"]').length > 0;
             const splitType = hasNestedChars ? 'characters' : (hasNestedWords ? 'words' : 'lines/words');
 
-            results.typographic_reveals.push({
+            const entry = {
                 selector: selector,
                 split_type: splitType,
                 text_preview: txt,
@@ -413,7 +469,9 @@ PROBE_SOPHISTICATED_FEATURES_JS = """
                     height: Math.round(r.height)
                 },
                 description: `SplitText cascade reveal on "${txt}" split by ${splitType} with staggered upward entrance.`
-            });
+            };
+            seenSplit.set(selector, entry);
+            results.typographic_reveals.push(entry);
         }
     });
 
@@ -423,13 +481,20 @@ PROBE_SOPHISTICATED_FEATURES_JS = """
     );
     if (mediaTriggers.length > 0) {
         const mediaUrls = [];
-        let triggerSelector = '[data-video="to-play"]';
+        const MEDIA_ATTRS = ['data-video', 'data-thumb-video', 'data-video-target', 'data-hover-media', 'data-preview-media'];
+        let triggerSelector = '[data-video]';
+        let targetSelector = null;
         let sampleRect = { top: 0, left: 0, width: 0, height: 0 };
         mediaTriggers.forEach((el, idx) => {
             if (idx === 0) {
-                const tag = el.tagName.toLowerCase();
-                const cls = typeof el.className === 'string' ? el.className.split(/\\s+/)[0] : '';
-                triggerSelector = cls ? `${tag}.${cls}[data-video]` : `${tag}[data-video]`;
+                triggerSelector = matchedSelector(el, MEDIA_ATTRS, 'video');
+                // The preview target is only reported when the trigger declares it and it resolves.
+                const declared = el.getAttribute('data-video-target');
+                if (declared) {
+                    try {
+                        if (document.querySelector(declared)) targetSelector = declared;
+                    } catch (e) { /* not a valid selector */ }
+                }
                 const r = el.getBoundingClientRect();
                 sampleRect = {
                     top: Math.round(r.top + window.scrollY),
@@ -446,7 +511,7 @@ PROBE_SOPHISTICATED_FEATURES_JS = """
 
         results.hover_media_switchers.push({
             trigger_selector: triggerSelector,
-            target_selector: '.hero-visual, .media-preview-container',
+            target_selector: targetSelector,
             media_samples: mediaUrls,
             count: mediaTriggers.length,
             dimensions: sampleRect,
@@ -464,9 +529,7 @@ PROBE_SOPHISTICATED_FEATURES_JS = """
             const m = el.getAttribute('data-move') || el.getAttribute('data-parallax') || 'vertical';
             modes.add(m);
             if (idx === 0) {
-                const tag = el.tagName.toLowerCase();
-                const cls = typeof el.className === 'string' ? el.className.split(/\\s+/)[0] : '';
-                sampleSelector = cls ? `${tag}.${cls}[data-move]` : `${tag}[data-move]`;
+                sampleSelector = matchedSelector(el, ['data-move', 'data-move-sc', 'data-parallax', 'data-scroll-speed'], 'parallax');
                 const r = el.getBoundingClientRect();
                 sampleRect = {
                     top: Math.round(r.top + window.scrollY),
@@ -535,11 +598,59 @@ def _text(entry: dict[str, Any], key: str, default: str = "") -> str:
     return value if isinstance(value, str) else default
 
 
+def _group_and_cap(
+    entries: list[dict[str, Any]], key_fields: tuple[str, ...] = ("selector",)
+) -> tuple[list[dict[str, Any]], int, list[str]]:
+    """Merge entries with the same key (summing `count`), then keep the first N groups.
+
+    Returns (kept entries with a merged `count`, omitted group count, omitted selectors).
+    """
+    groups: dict[tuple[str, ...], dict[str, Any]] = {}
+    for entry in entries:
+        key = tuple(_text(entry, f) for f in key_fields)
+        count = _coerce_int(entry.get("count"))
+        count = count if count is not None and count > 0 else 1
+        if key in groups:
+            groups[key]["count"] += count
+        else:
+            groups[key] = {**entry, "count": count}
+    merged = list(groups.values())
+    kept = merged[:MAX_FEATURES_PER_CATEGORY]
+    rest = merged[MAX_FEATURES_PER_CATEGORY:]
+    omitted_total = sum(int(e["count"]) for e in rest)
+    return kept, omitted_total, [str(e.get("selector", "")) for e in rest[:5]]
+
+
+def _overflow_feature(
+    category: Any, omitted: int, selectors: list[str]
+) -> SophisticatedFeature | None:
+    """Single summary entry standing in for features dropped by the per-category cap."""
+    if omitted <= 0:
+        return None
+    label = str(category).replace("_", " ")
+    return SophisticatedFeature(
+        category=category,
+        name=f"+{omitted} more {label}",
+        selector=f"(+{omitted} more)",
+        description=f"{omitted} additional {label} element(s) omitted (cap of {MAX_FEATURES_PER_CATEGORY} per category).",
+        dimensions={},
+        requires_independent_exploration=False,
+        exploration_status="detected",
+        suggested_implementation="",
+        details={"omitted": omitted, "omitted_selectors": selectors},
+    )
+
+
 def detect_and_explore_features(
     page: Page,
     explore: bool = True,
 ) -> SophisticatedFeaturesSummary:
-    """Probes the live page for sophisticated animation, sticky scenes, drawers, and interactive systems."""
+    """Probe the live page for sophisticated animation, sticky scenes, drawers and interactions.
+
+    Detection only: nothing is clicked, hovered or expanded, so every feature reports
+    ``detected``. `explore` is accepted for forward compatibility and currently has no effect.
+    """
+    del explore  # reserved; no exploration routine exists yet
     try:
         raw_probe: dict[str, Any] = page.evaluate(PROBE_SOPHISTICATED_FEATURES_JS)
     except Exception as e:
@@ -569,7 +680,7 @@ def detect_and_explore_features(
                 description=f"Active animation frameworks: {', '.join(detected_engines)}",
                 dimensions={},
                 requires_independent_exploration=False,
-                exploration_status="explored",
+                exploration_status="detected",
                 suggested_implementation="Integrate Framer Motion (`useScroll`, `useTransform`) or GSAP ScrollTrigger for fidelity.",
                 details={"engines": detected_engines},
             )
@@ -579,7 +690,9 @@ def detect_and_explore_features(
         )
 
     # Sticky tracks
-    sticky_tracks = _entries(raw_probe, "sticky_tracks")
+    sticky_tracks, sticky_omitted, sticky_rest = _group_and_cap(
+        _entries(raw_probe, "sticky_tracks")
+    )
     for track in sticky_tracks:
         features.append(
             SophisticatedFeature(
@@ -589,11 +702,12 @@ def detect_and_explore_features(
                 description=_text(track, "description"),
                 dimensions=_clean_dims(track.get("dimensions")),
                 requires_independent_exploration=True,
-                exploration_status="explored" if explore else "detected",
+                exploration_status="detected",
                 suggested_implementation="Replicate with CSS `position: sticky; top: 0` container inside a relative scroll track, or Framer Motion `useScroll()` with sequence steps.",
                 details={
                     "stickyHeight": _coerce_int(track.get("stickyHeight")),
                     "childItemsCount": _coerce_int(track.get("childItemsCount")),
+                    "count": track["count"],
                 },
             )
         )
@@ -601,8 +715,11 @@ def detect_and_explore_features(
             f"Explore {track['selector']}: Pinned scene spanning {_clean_dims(track.get('dimensions')).get('height', 0)}px scroll track. Do not flatten into static cards; preserve sticky phase-switching."
         )
 
+    if overflow := _overflow_feature("sticky_scroll_track", sticky_omitted, sticky_rest):
+        features.append(overflow)
+
     # Offscreen drawers & modals
-    drawers = _entries(raw_probe, "offscreen_drawers")
+    drawers, drawer_omitted, drawer_rest = _group_and_cap(_entries(raw_probe, "offscreen_drawers"))
     for drawer in drawers:
         features.append(
             SophisticatedFeature(
@@ -612,11 +729,12 @@ def detect_and_explore_features(
                 description=_text(drawer, "description"),
                 dimensions=_clean_dims(drawer.get("dimensions")),
                 requires_independent_exploration=True,
-                exploration_status="explored" if explore else "detected",
+                exploration_status="detected",
                 suggested_implementation="Implement as an isolated Dialog/Drawer component (e.g. Radix UI Dialog or Vaul drawer) triggered by card click.",
                 details={
                     "headings": drawer.get("headings", []),
                     "textPreview": drawer.get("textPreview", ""),
+                    "count": drawer["count"],
                 },
             )
         )
@@ -624,8 +742,11 @@ def detect_and_explore_features(
             f"Explore {drawer['selector']}: Deep off-screen drawer container ({_clean_dims(drawer.get('dimensions')).get('height', 0)}px tall) holding dynamic case study or form details."
         )
 
+    if overflow := _overflow_feature("offscreen_drawer", drawer_omitted, drawer_rest):
+        features.append(overflow)
+
     # Interactive disclosures
-    disclosures = _entries(raw_probe, "disclosures")
+    disclosures, disc_omitted, disc_rest = _group_and_cap(_entries(raw_probe, "disclosures"))
     for disc in disclosures:
         features.append(
             SophisticatedFeature(
@@ -635,14 +756,16 @@ def detect_and_explore_features(
                 description=_text(disc, "description"),
                 dimensions=_clean_dims(disc.get("dimensions")),
                 requires_independent_exploration=False,
-                exploration_status="explored",
+                exploration_status="detected",
                 suggested_implementation="Implement using `@radix-ui/react-accordion` or HTML5 `<details>` with Framer Motion `AnimatePresence` height animation.",
-                details={"title": disc.get("title")},
+                details={"title": disc.get("title"), "count": disc["count"]},
             )
         )
+    if overflow := _overflow_feature("interactive_disclosure", disc_omitted, disc_rest):
+        features.append(overflow)
 
     # Marquees
-    marquees = _entries(raw_probe, "marquees")
+    marquees, mq_omitted, mq_rest = _group_and_cap(_entries(raw_probe, "marquees"))
     for mq in marquees:
         features.append(
             SophisticatedFeature(
@@ -652,14 +775,18 @@ def detect_and_explore_features(
                 description=_text(mq, "description"),
                 dimensions=_clean_dims(mq.get("dimensions")),
                 requires_independent_exploration=False,
-                exploration_status="explored",
+                exploration_status="detected",
                 suggested_implementation="Replicate with CSS infinite marquee animation (`@keyframes marquee { 0% { transform: translateX(0); } 100% { transform: translateX(-50%); } }`) with duplicated items.",
-                details={},
+                details={"count": mq["count"]},
             )
         )
+    if overflow := _overflow_feature("marquee_stream", mq_omitted, mq_rest):
+        features.append(overflow)
 
     # Canvases
-    canvases = _entries(raw_probe, "canvases")
+    canvases, canvas_omitted, canvas_rest = _group_and_cap(
+        _entries(raw_probe, "canvases"), ("selector", "name")
+    )
     for c in canvases:
         features.append(
             SophisticatedFeature(
@@ -669,11 +796,13 @@ def detect_and_explore_features(
                 description=_text(c, "description"),
                 dimensions=_clean_dims(c.get("dimensions")),
                 requires_independent_exploration=True,
-                exploration_status="explored",
+                exploration_status="detected",
                 suggested_implementation="Wrap with `@react-three/fiber` / `@react-three/drei` Canvas for WebGL or HTML5 Canvas with requestAnimationFrame loop.",
-                details={"isWebGL": c.get("isWebGL")},
+                details={"isWebGL": c.get("isWebGL"), "count": c["count"]},
             )
         )
+    if overflow := _overflow_feature("webgl_canvas", canvas_omitted, canvas_rest):
+        features.append(overflow)
 
     # Kinetic Magnetic Elements
     magnetic_elements = _entries(raw_probe, "magnetic_elements")
@@ -686,7 +815,7 @@ def detect_and_explore_features(
                 description=_text(mag, "description"),
                 dimensions=_clean_dims(mag.get("dimensions")),
                 requires_independent_exploration=False,
-                exploration_status="explored",
+                exploration_status="detected",
                 suggested_implementation=(
                     "Implement with GSAP quickTo or Framer Motion spring physics. On mousemove over target, "
                     "translate target towards pointer ((clientX - center) / width * strength); on mouseleave, "
@@ -714,13 +843,14 @@ def detect_and_explore_features(
                 description=_text(cur, "description"),
                 dimensions=_clean_dims(cur.get("dimensions")),
                 requires_independent_exploration=False,
-                exploration_status="explored",
+                exploration_status="detected",
                 suggested_implementation=(
                     "Render fixed pointer-events-none cursor follower with lerp coordinates. "
                     "Expand circle on button hover ([data-cursor='btn']) and display floating thumbnail card "
                     "when hovering links with [data-cursor-img]."
                 ),
                 details={
+                    "element_detected": cur.get("element_detected") is True,
                     "states": cur.get("states", []),
                     "has_image_preview": cur.get("has_image_preview", False),
                     "preview_count": cur.get("preview_count", 0),
@@ -734,7 +864,9 @@ def detect_and_explore_features(
             )
 
     # Typographic SplitText Reveals
-    typographic_reveals = _entries(raw_probe, "typographic_reveals")
+    typographic_reveals, tr_omitted, tr_rest = _group_and_cap(
+        _entries(raw_probe, "typographic_reveals")
+    )
     for tr in typographic_reveals:
         features.append(
             SophisticatedFeature(
@@ -744,7 +876,7 @@ def detect_and_explore_features(
                 description=_text(tr, "description"),
                 dimensions=_clean_dims(tr.get("dimensions")),
                 requires_independent_exploration=False,
-                exploration_status="explored",
+                exploration_status="detected",
                 suggested_implementation=(
                     "Split heading text into word/character spans inside overflow-hidden wrappers. "
                     "Animate yPercent: 60 -> 0, opacity: 0 -> 1 with stagger: 0.02 upon viewport entry."
@@ -752,12 +884,16 @@ def detect_and_explore_features(
                 details={
                     "split_type": tr.get("split_type"),
                     "sample_text": tr.get("text_preview"),
+                    "count": tr["count"],
                 },
             )
         )
         recommended.append(
             f"Animate typographic entrance for {tr['selector']}: Stagger characters or words upward using overflow masks."
         )
+
+    if overflow := _overflow_feature("typographic_reveal", tr_omitted, tr_rest):
+        features.append(overflow)
 
     # Dynamic Hover Media Switchers
     hover_media_switchers = _entries(raw_probe, "hover_media_switchers", "trigger_selector")
@@ -770,13 +906,18 @@ def detect_and_explore_features(
                 description=_text(hms, "description"),
                 dimensions=_clean_dims(hms.get("dimensions")),
                 requires_independent_exploration=True,
-                exploration_status="explored" if explore else "detected",
+                exploration_status="detected",
                 suggested_implementation=(
                     "Listen to mouseenter on client/project list items to dynamically switch and play "
                     "the associated video loop or image preview in the central media viewer container."
                 ),
                 details={
-                    "target_selector": hms.get("target_selector"),
+                    # Only present when the page actually declared a resolvable target.
+                    **(
+                        {"target_selector": hms["target_selector"]}
+                        if isinstance(hms.get("target_selector"), str) and hms["target_selector"]
+                        else {}
+                    ),
                     "media_samples": hms.get("media_samples", []),
                     "count": hms.get("count", 1),
                 },
@@ -797,7 +938,7 @@ def detect_and_explore_features(
                 description=_text(sp, "description"),
                 dimensions=_clean_dims(sp.get("dimensions")),
                 requires_independent_exploration=False,
-                exploration_status="explored",
+                exploration_status="detected",
                 suggested_implementation=(
                     "Apply continuous scroll translation (transform: translateY) at customized scrub speeds "
                     "using Lenis scroll event or GSAP ScrollTrigger."

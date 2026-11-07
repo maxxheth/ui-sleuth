@@ -117,6 +117,9 @@ class MockServerHandler(http.server.SimpleHTTPRequestHandler):
         pass
 
 
+BLUEPRINT_BUDGET_BYTES = 30 * 1024
+
+
 @pytest.mark.browser
 def test_e2e_scrapling_engine(tmp_path: Path):
     # Start local server on available port
@@ -184,6 +187,17 @@ def test_e2e_scrapling_engine(tmp_path: Path):
         assert saved["json"].exists()
         assert saved["markdown"].exists()
         assert saved["yaml"].exists()
+
+        # Output budget: the "token-optimized" blueprint must stay small.
+        assert saved["json"].stat().st_size < BLUEPRINT_BUDGET_BYTES
+        assert all(
+            f.exploration_status != "explored"
+            for f in (
+                blueprint.sophisticated_features.features
+                if blueprint.sophisticated_features
+                else []
+            )
+        )
 
     finally:
         server.shutdown()

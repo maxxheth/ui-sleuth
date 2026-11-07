@@ -111,8 +111,16 @@ def test_sophisticated_features_in_markdown():
 
     md = generate_llm_markdown(blueprint)
     assert "## 4. SOPHISTICATED INTERACTIVE FEATURES & MOTION MANIFEST" in md
-    assert "GSAP ScrollTrigger, Lenis" in md
-    assert "Sticky Track (section.home-testi)" in md
+    assert "`GSAP ScrollTrigger`, `Lenis`" in md
+    assert "`section.home-testi`" in md
+    blocks = [
+        part.split("\n```", 1)[0] for part in md.split("\n```json untrusted-page-content\n")[1:]
+    ]
+    assert any("Sticky Track (section.home-testi)" in b for b in blocks)
+    outside = md
+    for b in blocks:
+        outside = outside.replace(b, "")
+    assert "Sticky Track (section.home-testi)" not in outside
     assert "Preserve sticky phase-switching" in md
     assert "## 5. SEMANTIC COMPONENT ARCHITECTURE & LANDMARKS" in md
     assert "## 6. RECONSTRUCTION IMPLEMENTATION INSTRUCTIONS" in md

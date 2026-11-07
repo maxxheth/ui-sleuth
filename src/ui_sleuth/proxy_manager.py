@@ -20,41 +20,130 @@ DEFAULT_DECODO_HOST = "isp.decodo.com"
 DEFAULT_DECODO_PORT = 10001
 
 
+REDACTED_PLACEHOLDER = "<proxy redacted>"
+_SCHEME_RE = re.compile(r"^([A-Za-z][A-Za-z0-9+.-]*)://(.*)$", re.DOTALL)
+
+
+class ProxyConfigError(ValueError):
+    """Raised when a requested proxy configuration is invalid or unusable.
+
+    Messages never contain proxy credentials or raw proxy strings.
+    """
+
+
+def _valid_port(value: str) -> bool:
+    return value.isdigit() and 0 < int(value) < 65536
+
+
+def _normalize_proxy(raw: str) -> str | None:
+    """Normalize a proxy string to ``scheme://[user:pass@]host:port``.
+
+    Accepts ``scheme://...``, ``user:pass@host:port``, ``host:port:user:pass`` and
+    ``host:port``. A scheme-less input gets ``http://``; an explicit scheme is kept.
+    Returns ``None`` when the string cannot be parsed (callers must not echo it).
+    """
+    value = raw.strip()
+    if not value or any(c.isspace() for c in value):
+        return None
+
+    scheme = "http"
+    match = _SCHEME_RE.match(value)
+    if match:
+        scheme, value = match.group(1).lower(), match.group(2)
+    value = value.rstrip("/")
+    if not value:
+        return None
+
+    creds = ""
+    if "@" in value:
+        creds, _, hostport = value.rpartition("@")
+        if not creds:
+            return None
+    else:
+        hostport = value
+        parts = value.split(":")
+        if len(parts) >= 4 and not match and _valid_port(parts[1]):
+            # host:port:user:pass (password may itself contain ':')
+            hostport = f"{parts[0]}:{parts[1]}"
+            creds = f"{parts[2]}:{':'.join(parts[3:])}"
+            if not parts[2]:
+                return None
+        elif len(parts) > 2:
+            return None
+
+    host, sep, port = hostport.rpartition(":")
+    if not sep:
+        return None
+    if not host or not _valid_port(port) or any(c in host for c in "/?#@"):
+        return None
+    if host.count(":") and not (host.startswith("[") and host.endswith("]")):
+        return None
+    return f"{scheme}://{creds + '@' if creds else ''}{host}:{port}"
+
+
+def normalize_proxy(raw: str) -> str:
+    """Public wrapper around ``_normalize_proxy`` that raises ``ProxyConfigError``."""
+    result = _normalize_proxy(raw)
+    if result is None:
+        raise ProxyConfigError(
+            "Unparseable proxy value; expected scheme://[user:pass@]host:port, "
+            "user:pass@host:port, host:port:user:pass or host:port"
+        )
+    return result
+
+
 def redact_proxy_url(proxy_url: str) -> str:
-    """Redact sensitive username/password from a proxy URL for safe display and logging."""
+    """Redact credentials from a proxy URL for display/logging. Fails closed."""
     if not proxy_url:
         return ""
+    normalized = _normalize_proxy(proxy_url)
+    if normalized is None:
+        return REDACTED_PLACEHOLDER
     try:
-        parsed = urlparse(proxy_url)
-        if parsed.password:
-            masked = f"{parsed.scheme}://{parsed.username}:***@{parsed.hostname}"
-            if parsed.port:
-                masked += f":{parsed.port}"
-            return masked
-        if parsed.username:
-            masked = f"{parsed.scheme}://{parsed.username}@{parsed.hostname}"
-            if parsed.port:
-                masked += f":{parsed.port}"
-            return masked
-        return proxy_url
-    except Exception:
-        # Fallback regex masking
-        return re.sub(r"://([^:@]+):([^@]+)@", r"://\1:***@", proxy_url)
+        parsed = urlparse(normalized)
+        if not parsed.scheme or not parsed.hostname:
+            return REDACTED_PLACEHOLDER
+        host = parsed.hostname
+        if ":" in host:
+            host = f"[{host}]"
+        masked = f"{parsed.scheme}://"
+        if parsed.username is not None:
+            masked += parsed.username
+            if parsed.password is not None:
+                masked += ":***"
+            masked += "@"
+        masked += host
+        if parsed.port:
+            masked += f":{parsed.port}"
+        return masked
+    except ValueError:
+        return REDACTED_PLACEHOLDER
 
 
 def load_proxies_from_file(file_path: str | Path) -> list[str]:
-    """Load proxy URLs from a text file (one URL per line, comments/blanks ignored)."""
+    """Load and normalize proxies from a text file (one per line, comments/blanks ignored).
+
+    Raises ``ProxyConfigError`` for a missing file or an unparseable line (the message
+    gives the file and line number, never the line content).
+    """
     path = Path(file_path)
     if not path.is_file():
-        logger.debug("Proxy file %s not found", path)
-        return []
+        raise ProxyConfigError(f"Proxy file not found: {path}")
 
     proxies: list[str] = []
     with open(path, encoding="utf-8") as f:
-        for line in f:
+        for lineno, line in enumerate(f, start=1):
             cleaned = line.strip()
-            if cleaned and not cleaned.startswith("#"):
-                proxies.append(cleaned)
+            if not cleaned or cleaned.startswith("#"):
+                continue
+            normalized = _normalize_proxy(cleaned)
+            if normalized is None:
+                raise ProxyConfigError(
+                    f"{path}:{lineno}: unparseable proxy line (content omitted); expected "
+                    "scheme://user:pass@host:port, user:pass@host:port, host:port:user:pass "
+                    "or host:port"
+                )
+            proxies.append(normalized)
     logger.info("Loaded %d proxies from %s", len(proxies), path)
     return proxies
 
@@ -149,72 +238,102 @@ class ProxyConfig:
         return None
 
 
+def _resolve_decodo() -> ProxyConfig:
+    """Resolve Decodo settings (DECODO_*). Only called when --decodo is requested."""
+    env_url = os.getenv("DECODO_PROXY_URL")
+    if env_url:
+        logger.info("Proxy source: DECODO_PROXY_URL")
+        return ProxyConfig(single_proxy=normalize_proxy(env_url))
+
+    user = os.getenv("DECODO_USERNAME")
+    password = os.getenv("DECODO_PASSWORD")
+    if user and password:
+        host = os.getenv("DECODO_HOST", DEFAULT_DECODO_HOST)
+        try:
+            start = int(os.getenv("DECODO_PORT_START", str(DEFAULT_DECODO_PORT)))
+            end = int(os.getenv("DECODO_PORT_END", "10010"))
+        except ValueError:
+            raise ProxyConfigError(
+                "--decodo: DECODO_PORT_START/DECODO_PORT_END must be integers"
+            ) from None
+        pool = generate_decodo_pool(user, password, host, start, end)
+        if not pool:
+            raise ProxyConfigError(
+                f"--decodo: empty proxy pool (DECODO_PORT_START={start} > DECODO_PORT_END={end})"
+            )
+        pool = [normalize_proxy(p) for p in pool]
+        logger.info("Proxy source: DECODO_USERNAME/DECODO_PASSWORD pool (%d ports)", len(pool))
+        return ProxyConfig(proxy_list=pool)
+
+    decodo_file = os.getenv("DECODO_PROXY_FILE")
+    if decodo_file:
+        proxies = load_proxies_from_file(decodo_file)
+        if not proxies:
+            raise ProxyConfigError(f"--decodo: DECODO_PROXY_FILE {decodo_file} has no proxies")
+        logger.info("Proxy source: DECODO_PROXY_FILE %s", decodo_file)
+        return ProxyConfig(proxy_list=proxies)
+
+    raise ProxyConfigError(
+        "--decodo requires DECODO_PROXY_URL, DECODO_USERNAME and DECODO_PASSWORD, "
+        "or DECODO_PROXY_FILE to be set"
+    )
+
+
+def _resolve_env() -> ProxyConfig:
+    """Resolve PROXY_FILE / HTTPS_PROXY / HTTP_PROXY. Only called for --proxy-env."""
+    env_file = os.getenv("PROXY_FILE")
+    if env_file:
+        proxies = load_proxies_from_file(env_file)
+        if not proxies:
+            raise ProxyConfigError(f"--proxy-env: PROXY_FILE {env_file} has no proxies")
+        logger.info("Proxy source: PROXY_FILE %s", env_file)
+        return ProxyConfig(proxy_list=proxies)
+    standard = os.getenv("HTTPS_PROXY") or os.getenv("HTTP_PROXY")
+    if standard:
+        logger.info("Proxy source: HTTP(S)_PROXY")
+        return ProxyConfig(single_proxy=normalize_proxy(standard))
+    raise ProxyConfigError("--proxy-env: none of PROXY_FILE, HTTPS_PROXY, HTTP_PROXY is set")
+
+
 def resolve_proxy_config(
     proxy: str | None = None,
     proxy_file: str | None = None,
     enable_decodo: bool = False,
+    use_env: bool = False,
+    no_proxy: bool = False,
 ) -> ProxyConfig:
-    """Resolve proxy configuration from CLI args, environment variables, or default files."""
-    # 1. Explicit single proxy provided via CLI
-    if proxy:
-        return ProxyConfig(single_proxy=proxy)
+    """Resolve proxy configuration from explicit opt-ins only.
 
-    # 2. Explicit proxy file provided via CLI
+    Precedence (first match wins; nothing is read from the environment or the
+    working directory unless explicitly requested):
+
+    1. ``no_proxy``: direct connection (conflicts with any other source -> error)
+    2. ``proxy``: single proxy
+    3. ``proxy_file``: pool from file
+    4. ``enable_decodo``: DECODO_PROXY_URL / DECODO_USERNAME+PASSWORD / DECODO_PROXY_FILE
+    5. ``use_env``: PROXY_FILE / HTTPS_PROXY / HTTP_PROXY
+    6. otherwise: direct connection
+
+    Raises ``ProxyConfigError`` if a requested source yields no usable proxy.
+    """
+    if no_proxy:
+        if proxy or proxy_file or enable_decodo or use_env:
+            raise ProxyConfigError("--no-proxy cannot be combined with other proxy options")
+        return ProxyConfig()
+
+    if proxy:
+        return ProxyConfig(single_proxy=normalize_proxy(proxy))
+
     if proxy_file:
         proxies = load_proxies_from_file(proxy_file)
-        if proxies:
-            return ProxyConfig(proxy_list=proxies)
+        if not proxies:
+            raise ProxyConfigError(f"Proxy file {proxy_file} contains no proxies")
+        return ProxyConfig(proxy_list=proxies)
 
-    # 3. Environment variable DECODO_PROXY_URL
-    env_decodo_url = os.getenv("DECODO_PROXY_URL")
-    if env_decodo_url:
-        return ProxyConfig(single_proxy=env_decodo_url)
-
-    # 4. Decodo credentials in environment (activated via --decodo)
     if enable_decodo:
-        decodo_user = os.getenv("DECODO_USERNAME")
-        decodo_pass = os.getenv("DECODO_PASSWORD")
-        if decodo_user and decodo_pass:
-            decodo_host = os.getenv("DECODO_HOST", DEFAULT_DECODO_HOST)
-            start_port_str = os.getenv("DECODO_PORT_START", "10001")
-            end_port_str = os.getenv("DECODO_PORT_END", "10010")
-            try:
-                start_port = int(start_port_str)
-                end_port = int(end_port_str)
-                pool = generate_decodo_pool(
-                    username=decodo_user,
-                    password=decodo_pass,
-                    host=decodo_host,
-                    start_port=start_port,
-                    end_port=end_port,
-                )
-                return ProxyConfig(proxy_list=pool)
-            except ValueError:
-                single = build_decodo_url(decodo_user, decodo_pass, decodo_host)
-                return ProxyConfig(single_proxy=single)
+        return _resolve_decodo()
 
-        decodo_file = os.getenv("DECODO_PROXY_FILE")
-        if decodo_file and Path(decodo_file).is_file():
-            proxies = load_proxies_from_file(decodo_file)
-            if proxies:
-                logger.info("Using Decodo proxies from %s", decodo_file)
-                return ProxyConfig(proxy_list=proxies)
-    env_proxy_file = os.getenv("PROXY_FILE")
-    if env_proxy_file:
-        proxies = load_proxies_from_file(env_proxy_file)
-        if proxies:
-            return ProxyConfig(proxy_list=proxies)
-
-    # 6. Auto-detect proxies.txt in current directory if present
-    cwd_proxy = Path.cwd() / "proxies.txt"
-    if cwd_proxy.is_file():
-        proxies = load_proxies_from_file(cwd_proxy)
-        if proxies:
-            return ProxyConfig(proxy_list=proxies)
-
-    # 7. Standard HTTP_PROXY / HTTPS_PROXY
-    standard_proxy = os.getenv("HTTPS_PROXY") or os.getenv("HTTP_PROXY")
-    if standard_proxy:
-        return ProxyConfig(single_proxy=standard_proxy)
+    if use_env:
+        return _resolve_env()
 
     return ProxyConfig()

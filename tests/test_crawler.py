@@ -322,7 +322,7 @@ def test_export_site_design_system():
         assert (out_dir / "pages" / "index" / "blueprint.json").exists()
 
         md_content = (out_dir / "site_design_system.md").read_text(encoding="utf-8")
-        assert "MULTI-PAGE COMPONENT SYSTEM" in md_content
+        assert "Multi-Page UI Reconstruction Brief" in md_content
         assert "GlobalNavbar" in md_content
         assert "FeatureCard" in md_content
 

@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import datetime
+import ipaddress
 import logging
 import shutil
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
+from urllib.parse import urlparse
 
 from scrapling import DynamicFetcher, StealthyFetcher
 
@@ -22,7 +24,7 @@ from ui_sleuth.models import (
     SiteBlueprint,
     SiteMetadata,
 )
-from ui_sleuth.proxy_manager import ProxyConfig, resolve_proxy_config
+from ui_sleuth.proxy_manager import ProxyConfig
 from ui_sleuth.token_extractor import harvest_design_tokens
 
 if TYPE_CHECKING:
@@ -153,6 +155,18 @@ async ({ maxMs = 15000, maxSteps = 80, maxHeight = 40000 } = {}) => {
 """
 
 
+def is_loopback_url(url: str) -> bool:
+    """True if the URL's hostname is a loopback address (not a substring match)."""
+    try:
+        host = (urlparse(url).hostname or "").lower()
+    except ValueError:
+        return False
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return host == "localhost" or host.endswith(".localhost")
+
+
 class ScraplingEngine:
     """Core extraction engine integrating Scrapling, network hooks, and multimodal capture."""
 
@@ -176,7 +190,7 @@ class ScraplingEngine:
         self.timeout_seconds = timeout
         self.timeout_ms = timeout * 1000
         self.viewport = parse_viewport(viewport)
-        self.proxy_config = proxy_config or resolve_proxy_config()
+        self.proxy_config = proxy_config or ProxyConfig()
         self.use_stealth = use_stealth
         self.headless = headless
         self.screenshot_path = screenshot_path
@@ -304,10 +318,11 @@ class ScraplingEngine:
 
         # Proxy integration (supports single Decodo proxy or Decodo round-robin rotator)
         # Skip proxies for loopback / local addresses
-        is_loopback = "127.0.0.1" in self.url or "localhost" in self.url
-        if not is_loopback:
-            proxy_kwargs = self.proxy_config.to_scrapling_kwargs()
-            fetch_kwargs.update(proxy_kwargs)
+        if is_loopback_url(self.url):
+            if self.proxy_config.has_proxy:
+                logger.info("Skipping configured proxy for loopback target %s", self.url)
+        else:
+            fetch_kwargs.update(self.proxy_config.to_scrapling_kwargs())
 
         # Execute Scrapling fetch
         try:

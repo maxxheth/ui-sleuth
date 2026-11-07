@@ -18,7 +18,7 @@
    - Native support for Decodo ISP and residential proxy pools.
    - Automatic proxy parsing, credentials handling, and password redaction.
    - Round-robin proxy rotation pool support via Scrapling's `ProxyRotator`.
-   - Auto-detection of `proxies.txt` or `--decodo` flag referencing `.env` or proxy list files.
+   - Proxies are opt-in only (`--proxy`, `--proxy-file`, `--decodo`, `--proxy-env`); nothing is picked up implicitly. `--no-proxy` forces a direct connection.
 
 3. **Design Token Harvesting (`token_extractor.py`)**
    - Client-side JavaScript evaluation that samples computed styles across landmarks (`header`, `main`, `footer`, `section`, `nav`).
@@ -105,20 +105,29 @@ uv run ui-sleuth extract https://example.com \
   --screenshot
 ```
 
-### Decodo Proxy Support
-Pass a single proxy, a proxy list file, or enable Decodo environment variables:
-```bash
-# Direct proxy URL
-uv run ui-sleuth extract https://example.com --proxy "http://username:password@isp.decodo.com:10001"
+### Proxy Support
+Proxies are **opt-in**. Without a proxy flag the connection is always direct; `proxies.txt`, `PROXY_FILE`, `HTTP(S)_PROXY` and `DECODO_*` are never read implicitly.
 
-# Load pool from file (rotates across ports round-robin)
+```bash
+# Single proxy (any of: scheme://user:pass@host:port, user:pass@host:port, host:port:user:pass, host:port)
+uv run ui-sleuth extract https://example.com --proxy "user:password@isp.decodo.com:10001"
+
+# Pool from file, one proxy per line, same formats (rotates round-robin)
 uv run ui-sleuth extract https://example.com --proxy-file ./proxies.txt
 
-# Automatically use Decodo proxy configuration
+# Decodo settings from DECODO_* environment / .env
 uv run ui-sleuth extract https://example.com --decodo
+
+# PROXY_FILE / HTTPS_PROXY / HTTP_PROXY from the environment
+uv run ui-sleuth extract https://example.com --proxy-env
+
+# Force a direct connection
+uv run ui-sleuth extract https://example.com --no-proxy
 ```
 
-Environment variables supported in `.env`:
+Precedence when several are given: `--no-proxy` (cannot be combined with others) > `--proxy` > `--proxy-file` > `--decodo` > `--proxy-env`. Proxies without a scheme are normalized to `http://user:pass@host:port`; an explicit scheme (`socks5://`, `https://`) is preserved. Unparseable proxy-file lines abort with the file and line number (never the content). If `--decodo` (or `--proxy-env`) cannot produce a usable proxy (missing credentials, `DECODO_PORT_START` > `DECODO_PORT_END`, ...), the command exits with an error instead of silently connecting directly. Passwords are always redacted in output and logs. Loopback targets (`localhost`, `*.localhost`, `127.0.0.0/8`, `::1`) bypass the proxy, and this is logged at INFO.
+
+Environment variables read only with `--decodo`, in `.env`:
 ```env
 DECODO_PROXY_URL="http://your_username:your_password@isp.decodo.com:10001"
 # or
@@ -127,6 +136,8 @@ DECODO_PASSWORD="your_password"
 DECODO_HOST="isp.decodo.com"
 DECODO_PORT_START=10001
 DECODO_PORT_END=10010
+# or
+DECODO_PROXY_FILE="./decodo-proxies.txt"
 ```
 
 ### Stealth Mode (Cloudflare Turnstile Bypass)
@@ -149,9 +160,11 @@ Options:
       --wait-until <str>        Wait condition: 'networkidle', 'load', or CSS selector [default: networkidle]
   -t, --timeout <int>           Timeout in seconds [default: 30]
       --viewport <str>          Emulated viewport dimensions (WIDTHxHEIGHT) [default: 1440x900]
-      --proxy <str>             Single proxy URL
-      --proxy-file <str>        Path to text file containing proxy URLs
-      --decodo                  Enable Decodo ISP proxy integration
+      --proxy <str>             Single proxy (scheme://user:pass@host:port, user:pass@host:port, host:port:user:pass, host:port)
+      --proxy-file <str>        Path to text file with one proxy per line
+      --decodo                  Use DECODO_* settings (errors if unusable)
+      --proxy-env               Use PROXY_FILE / HTTPS_PROXY / HTTP_PROXY from the environment
+      --no-proxy                Force a direct connection
       --stealth                 Use StealthyFetcher to bypass Cloudflare
   -f, --format <str>            Output format: 'all', 'json', 'markdown', or 'yaml' [default: all]
       --headless / --no-headless Run browser in headless or visible mode [default: headless]
@@ -179,9 +192,11 @@ Options:
       --wait-until <str>        Wait condition: 'networkidle', 'load', or CSS selector [default: networkidle]
   -t, --timeout <int>           Timeout in seconds [default: 30]
       --viewport <str>          Emulated viewport dimensions (WIDTHxHEIGHT) [default: 1440x900]
-      --proxy <str>             Single proxy URL
-      --proxy-file <str>        Path to text file containing proxy URLs
-      --decodo                  Enable Decodo ISP proxy integration
+      --proxy <str>             Single proxy (scheme://user:pass@host:port, user:pass@host:port, host:port:user:pass, host:port)
+      --proxy-file <str>        Path to text file with one proxy per line
+      --decodo                  Use DECODO_* settings (errors if unusable)
+      --proxy-env               Use PROXY_FILE / HTTPS_PROXY / HTTP_PROXY from the environment
+      --no-proxy                Force a direct connection
       --stealth                 Use StealthyFetcher to bypass Cloudflare
   -f, --format <str>            Output format: 'all', 'json', 'markdown', or 'yaml' [default: all]
       --headless / --no-headless Run browser in headless or visible mode [default: headless]

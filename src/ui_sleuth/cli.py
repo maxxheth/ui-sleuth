@@ -9,12 +9,13 @@ from typing import Annotated
 import typer
 from dotenv import load_dotenv
 from rich.console import Console
+from rich.markup import escape
 from rich.panel import Panel
 from rich.table import Table
 
 from ui_sleuth.crawler import SiteCrawler
 from ui_sleuth.exporter import export_blueprint, export_site_design_system
-from ui_sleuth.proxy_manager import ProxyConfig, resolve_proxy_config
+from ui_sleuth.proxy_manager import ProxyConfig, ProxyConfigError, resolve_proxy_config
 from ui_sleuth.scrapling_engine import ScraplingEngine
 
 load_dotenv()
@@ -37,6 +38,29 @@ def setup_logging(verbose: bool = False) -> None:
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
         datefmt="%H:%M:%S",
     )
+
+
+def _resolve_proxy_or_exit(
+    proxy: str | None,
+    proxy_file: str | None,
+    decodo: bool,
+    proxy_env: bool,
+    no_proxy: bool,
+) -> ProxyConfig:
+    """Resolve proxy options; print a credential-free error and exit 1 on failure."""
+    try:
+        cfg = resolve_proxy_config(
+            proxy=proxy,
+            proxy_file=proxy_file,
+            enable_decodo=decodo,
+            use_env=proxy_env,
+            no_proxy=no_proxy,
+        )
+    except ProxyConfigError as e:
+        console.print(f"[bold red]Proxy configuration error:[/bold red] {escape(str(e))}")
+        raise typer.Exit(code=1) from e
+    logging.getLogger(__name__).info("Proxy: %s", cfg.get_display_summary() or "direct")
+    return cfg
 
 
 def _execute_multi_page_crawl(
@@ -201,20 +225,33 @@ def extract(
     proxy: Annotated[
         str | None,
         typer.Option(
-            "--proxy", help="Single proxy URL (e.g. http://user:pass@isp.decodo.com:10001)"
+            "--proxy",
+            help="Single proxy (scheme://user:pass@host:port, user:pass@host:port, "
+            "host:port:user:pass or host:port)",
         ),
     ] = None,
     proxy_file: Annotated[
         str | None,
         typer.Option(
-            "--proxy-file", help="Path to text file containing proxy URLs (e.g. proxies.txt)"
+            "--proxy-file", help="Path to text file with one proxy per line (same formats)"
         ),
     ] = None,
     decodo: Annotated[
         bool,
         typer.Option(
-            "--decodo", help="Enable Decodo ISP proxy integration from environment/proxies.txt"
+            "--decodo",
+            help="Use Decodo settings from DECODO_* env/.env (errors if unusable)",
         ),
+    ] = False,
+    proxy_env: Annotated[
+        bool,
+        typer.Option(
+            "--proxy-env", help="Use PROXY_FILE / HTTPS_PROXY / HTTP_PROXY from the environment"
+        ),
+    ] = False,
+    no_proxy: Annotated[
+        bool,
+        typer.Option("--no-proxy", help="Force a direct connection (no proxy)"),
     ] = False,
     stealth: Annotated[
         bool,
@@ -298,11 +335,12 @@ def extract(
     if not target_url.startswith(("http://", "https://")):
         target_url = f"https://{target_url}"
 
-    # Resolve proxy settings (Decodo / custom)
-    proxy_cfg = resolve_proxy_config(
+    proxy_cfg = _resolve_proxy_or_exit(
         proxy=proxy,
         proxy_file=proxy_file,
-        enable_decodo=decodo,
+        decodo=decodo,
+        proxy_env=proxy_env,
+        no_proxy=no_proxy,
     )
 
     # Multi-page crawl activation
@@ -478,20 +516,33 @@ def crawl(
     proxy: Annotated[
         str | None,
         typer.Option(
-            "--proxy", help="Single proxy URL (e.g. http://user:pass@isp.decodo.com:10001)"
+            "--proxy",
+            help="Single proxy (scheme://user:pass@host:port, user:pass@host:port, "
+            "host:port:user:pass or host:port)",
         ),
     ] = None,
     proxy_file: Annotated[
         str | None,
         typer.Option(
-            "--proxy-file", help="Path to text file containing proxy URLs (e.g. proxies.txt)"
+            "--proxy-file", help="Path to text file with one proxy per line (same formats)"
         ),
     ] = None,
     decodo: Annotated[
         bool,
         typer.Option(
-            "--decodo", help="Enable Decodo ISP proxy integration from environment/proxies.txt"
+            "--decodo",
+            help="Use Decodo settings from DECODO_* env/.env (errors if unusable)",
         ),
+    ] = False,
+    proxy_env: Annotated[
+        bool,
+        typer.Option(
+            "--proxy-env", help="Use PROXY_FILE / HTTPS_PROXY / HTTP_PROXY from the environment"
+        ),
+    ] = False,
+    no_proxy: Annotated[
+        bool,
+        typer.Option("--no-proxy", help="Force a direct connection (no proxy)"),
     ] = False,
     stealth: Annotated[
         bool,
@@ -553,10 +604,12 @@ def crawl(
     if not target_url.startswith(("http://", "https://")):
         target_url = f"https://{target_url}"
 
-    proxy_cfg = resolve_proxy_config(
+    proxy_cfg = _resolve_proxy_or_exit(
         proxy=proxy,
         proxy_file=proxy_file,
-        enable_decodo=decodo,
+        decodo=decodo,
+        proxy_env=proxy_env,
+        no_proxy=no_proxy,
     )
 
     _execute_multi_page_crawl(

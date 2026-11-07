@@ -1,6 +1,9 @@
 """Tests for dom_pruner module."""
 
+from lxml import html
+
 from ui_sleuth.dom_pruner import (
+    clean_dom_tree,
     prune_and_map_dom,
 )
 
@@ -206,3 +209,59 @@ def test_repeated_articles_collapse_into_pattern():
         ("ArticleCard", 6)
     ]
     assert len([s for s in main_lm.subsections if s.tag_name == "article"]) == 1
+
+
+def _img(attrs: str) -> html.HtmlElement:
+    return html.fromstring(f"<div><img {attrs}></div>").find("img")
+
+
+def test_tracking_image_requires_tiny_size_or_tracker_host():
+    from ui_sleuth.dom_pruner import is_tracking_pixel
+
+    assert is_tracking_pixel(_img('src="/a.gif" width="1" height="1"'))
+    assert is_tracking_pixel(_img('src="/a.gif" width="0" height="2"'))
+    assert is_tracking_pixel(_img('src="/a.gif" style="width:1px;height:1px"'))
+    assert is_tracking_pixel(_img('src="https://www.facebook.com/tr?id=1&ev=PageView"'))
+    assert is_tracking_pixel(_img('src="https://stats.g.doubleclick.net/x.gif"'))
+    assert is_tracking_pixel(_img('src="https://bat.bing.com/action/0"'))
+    assert is_tracking_pixel(_img('src="https://www.clarity.ms/collect"'))
+    assert not is_tracking_pixel(_img('src="/img/soundtrack-cover.jpg"'))
+    assert not is_tracking_pixel(_img('src="/img/pixel-art.png"'))
+    assert not is_tracking_pixel(_img('src="/a.png" class="track-image" id="pixel-hero"'))
+    assert not is_tracking_pixel(_img('src="/a.png" width="400" height="300"'))
+    assert not is_tracking_pixel(_img('src="https://notfacebook.com/tr"'))
+    assert not is_tracking_pixel(_img('src="https://www.facebook.com/photo.jpg"'))
+
+
+def test_clean_dom_keeps_lookalike_images():
+    tree = html.fromstring(
+        '<div><img src="soundtrack-cover.jpg"><img src="pixel-art.png">'
+        '<img class="track-image" src="x.png"><img src="p.gif" width="1" height="1"></div>'
+    )
+    clean_dom_tree(tree)
+    assert [i.get("src") for i in tree.iter("img")] == [
+        "soundtrack-cover.jpg",
+        "pixel-art.png",
+        "x.png",
+    ]
+
+
+def _name(cls: str, tag: str = "div") -> str:
+    from ui_sleuth.dom_pruner import infer_pattern_name
+
+    return infer_pattern_name(html.fromstring(f'<{tag} class="{cls}"></{tag}>'), "div")
+
+
+def test_pattern_name_matches_whole_tokens():
+    assert _name("explanation-box") != "PricingPlanCard"
+    assert _name("status-badge") != "MetricCard"
+    assert _name("preview-card") != "TestimonialCard"
+    assert _name("newsletter-signup") != "ArticleCard"
+    assert _name("w-dyn-item") != "ProductCard"
+    assert _name("carousel-item") != "ProductCard"
+    assert _name("pricing_plan") == "PricingPlanCard"
+    assert _name("customer-review") == "TestimonialCard"
+    assert _name("news-card") == "ArticleCard"
+    assert _name("stat") == "MetricCard"
+    assert _name("nav-item") == "NavMenuItem"
+    assert _name("product-card") == "ProductCard"

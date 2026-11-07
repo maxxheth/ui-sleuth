@@ -21,56 +21,85 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 # Complete client-side JS evaluation script
-HARVEST_TOKENS_JS = """
+HARVEST_TOKENS_JS = r"""
 () => {
     const colorCanvas = document.createElement('canvas');
     colorCanvas.width = 1;
     colorCanvas.height = 1;
     let colorCtx = null;
-    try { colorCtx = colorCanvas.getContext('2d'); } catch (e) {}
+    try { colorCtx = colorCanvas.getContext('2d', { willReadFrequently: true }); } catch (e) {}
 
-    function rgbToHex(rgbStr) {
-        if (!rgbStr || rgbStr === 'transparent' || rgbStr === 'rgba(0, 0, 0, 0)') {
+    // Two distinct sentinels: an unparseable value leaves the canvas on the sentinel we set, so
+    // assigning the same value after each sentinel yields different results only when it was
+    // rejected. A legit black/white (e.g. oklch(0 0 0)) yields the same result both times.
+    const SENTINEL_A = '#000000';
+    const SENTINEL_B = '#ffffff';
+
+    // Resolve any CSS color string to sRGB {r, g, b, a} by painting it on the 1x1 canvas and
+    // reading the pixel back. Modern Chromium keeps oklch()/color() unconverted in
+    // ctx.fillStyle, so the pixel readback is what actually yields sRGB bytes.
+    function canvasResolve(str) {
+        if (!colorCtx) return null;
+        try {
+            colorCtx.fillStyle = SENTINEL_A;
+            colorCtx.fillStyle = str;
+            const viaA = colorCtx.fillStyle;
+            colorCtx.fillStyle = SENTINEL_B;
+            colorCtx.fillStyle = str;
+            const viaB = colorCtx.fillStyle;
+            if (viaA !== viaB) return null;  // rejected: canvas kept whichever sentinel we set
+            colorCtx.clearRect(0, 0, 1, 1);
+            colorCtx.fillRect(0, 0, 1, 1);
+            const d = colorCtx.getImageData(0, 0, 1, 1).data;
+            return { r: d[0], g: d[1], b: d[2], a: d[3] / 255 };
+        } catch (e) {
             return null;
         }
-        if (rgbStr.startsWith('#')) {
-            if (rgbStr.length === 4) {
-                return '#' + rgbStr[1] + rgbStr[1] + rgbStr[2] + rgbStr[2] + rgbStr[3] + rgbStr[3];
-            }
-            return rgbStr.toLowerCase().slice(0, 7);
-        }
+    }
 
-        const match = rgbStr.match(/rgba?\\((\\d+)[,\\s]+(\\d+)[,\\s]+(\\d+)(?:[,/\\s]+([\\d.]+))?\\)/);
-        if (match) {
-            if (match[4] !== undefined && parseFloat(match[4]) < 0.1) {
-                return null;
-            }
-            const r = parseInt(match[1], 10).toString(16).padStart(2, '0');
-            const g = parseInt(match[2], 10).toString(16).padStart(2, '0');
-            const b = parseInt(match[3], 10).toString(16).padStart(2, '0');
-            return ('#' + r + g + b).toLowerCase();
-        }
+    const HEX_RE = /^#([0-9a-f]{3,4}|[0-9a-f]{6}|[0-9a-f]{8})$/;
+    const RGB_RE = /^rgba?\(\s*([\d.]+)(%?)[,\s]+([\d.]+)(%?)[,\s]+([\d.]+)(%?)\s*(?:[,\/]\s*([\d.]+)(%?))?\s*\)$/;
 
-        // Support modern CSS color functions (oklch, lab, color(), hsl) by normalizing via 2D canvas context
-        if (colorCtx) {
-            try {
-                colorCtx.fillStyle = '#000000';
-                colorCtx.fillStyle = rgbStr;
-                const normalized = colorCtx.fillStyle;
-                if (normalized && normalized !== '#000000') {
-                    if (normalized.startsWith('#')) return normalized.toLowerCase().slice(0, 7);
-                    const nMatch = normalized.match(/rgba?\\((\\d+)[,\\s]+(\\d+)[,\\s]+(\\d+)(?:[,/\\s]+([\\d.]+))?\\)/);
-                    if (nMatch) {
-                        if (nMatch[4] !== undefined && parseFloat(nMatch[4]) < 0.1) return null;
-                        const r = parseInt(nMatch[1], 10).toString(16).padStart(2, '0');
-                        const g = parseInt(nMatch[2], 10).toString(16).padStart(2, '0');
-                        const b = parseInt(nMatch[3], 10).toString(16).padStart(2, '0');
-                        return ('#' + r + g + b).toLowerCase();
-                    }
-                }
-            } catch (e) {}
+    // Returns {r, g, b, a} (0-255, alpha 0-1) or null if the string is not a usable color.
+    function parseSimpleColor(str) {
+        const hm = str.match(HEX_RE);
+        if (hm) {
+            let h = hm[1];
+            if (h.length <= 4) h = h.split('').map(c => c + c).join('');
+            return {
+                r: parseInt(h.slice(0, 2), 16),
+                g: parseInt(h.slice(2, 4), 16),
+                b: parseInt(h.slice(4, 6), 16),
+                a: h.length === 8 ? parseInt(h.slice(6, 8), 16) / 255 : 1
+            };
+        }
+        const m = str.match(RGB_RE);
+        if (m) {
+            const ch = (v, pct) => Math.max(0, Math.min(255, Math.round(pct ? parseFloat(v) * 2.55 : parseFloat(v))));
+            let a = 1;
+            if (m[7] !== undefined) a = m[8] ? parseFloat(m[7]) / 100 : parseFloat(m[7]);
+            return { r: ch(m[1], m[2]), g: ch(m[3], m[4]), b: ch(m[5], m[6]), a: Math.max(0, Math.min(1, a)) };
         }
         return null;
+    }
+
+    function rgbToHex(rgbStr) {
+        if (!rgbStr) return null;
+        const str = String(rgbStr).trim().toLowerCase();
+        if (!str || str === 'transparent') return null;
+
+        let c = parseSimpleColor(str);
+        if (!c) {
+            // Modern CSS color functions (oklch, lab, color(), hsl, named): normalize via canvas
+            c = canvasResolve(str);
+        }
+        if (!c) return null;
+        if (c.a < 0.1) return null;  // effectively invisible
+
+        const h2 = n => n.toString(16).padStart(2, '0');
+        let hex = '#' + h2(c.r) + h2(c.g) + h2(c.b);
+        if (c.a < 1) hex += h2(Math.round(c.a * 255));  // keep alpha as #rrggbbaa
+        return hex;
     }
 
     // 1. HARVEST COLORS
@@ -210,38 +239,120 @@ HARVEST_TOKENS_JS = """
         .slice(0, 5)
         .map(entry => entry[0]);
 
-    // 4. CSS CUSTOM PROPERTIES (--color-*, --theme-*)
-    const customProps = {};
-    try {
-        for (const sheet of Array.from(document.styleSheets)) {
-            try {
-                const rules = sheet.cssRules || sheet.rules;
-                if (!rules) continue;
-                for (const rule of Array.from(rules)) {
-                    if (rule.selectorText && (rule.selectorText === ':root' || rule.selectorText === 'html')) {
-                        const style = rule.style;
-                        for (let i = 0; i < style.length; i++) {
-                            const propName = style[i];
-                            if (propName.startsWith('--color-') || propName.startsWith('--theme-') || propName.startsWith('--primary') || propName.startsWith('--accent')) {
-                                customProps[propName] = style.getPropertyValue(propName).trim();
-                            }
-                        }
-                    }
-                }
-            } catch (e) {
-                // Cross-origin stylesheet access restriction, ignore
+    // 4. CSS CUSTOM PROPERTIES
+    const MAX_CUSTOM_PROPS = 150;
+    const customProps = new Map();     // name -> value
+    const setProps = new Map();        // name -> true when set by an unconditional plain root rule
+    const PLAIN_ROOT_RE = /^(?:html|:root|:host|body)$/i;
+    // html/:root/:host/body optionally qualified by attributes, classes, ids or :not/:is/:where
+    const QUALIFIED_ROOT_RE = /^(?:html|:root|:host(?:\([^)]*\))?|body)?(?:\[[^\]]*\]|\.[\w-]+|#[\w-]+|:(?:not|is|where)\([^)]*\))*$/i;
+    // Bare theme-attribute selectors such as [data-theme="dark"] or [data-bs-theme=light]
+    const THEME_ATTR_RE = /^\[(?:data-[\w-]*theme[\w-]*|data-mode|data-color-scheme|theme)[^\]]*\]$/i;
+
+    function splitSelectors(text) {
+        const out = [];
+        let depth = 0, quote = null, cur = '';
+        for (const ch of text) {
+            if (quote) { if (ch === quote) quote = null; cur += ch; continue; }
+            if (ch === '"' || ch === "'") { quote = ch; cur += ch; continue; }
+            if (ch === '(' || ch === '[') depth++;
+            if (ch === ')' || ch === ']') depth--;
+            if (ch === ',' && depth === 0) { out.push(cur.trim()); cur = ''; continue; }
+            cur += ch;
+        }
+        if (cur.trim()) out.push(cur.trim());
+        return out;
+    }
+
+    // Returns 'plain' | 'qualified' | null for a single selector
+    function rootKind(sel) {
+        if (PLAIN_ROOT_RE.test(sel)) return 'plain';
+        if (THEME_ATTR_RE.test(sel)) return 'qualified';
+        if (sel && QUALIFIED_ROOT_RE.test(sel) && /^(?:html|:root|:host|body)/i.test(sel)) return 'qualified';
+        return null;
+    }
+
+    function recordProps(style, plain) {
+        for (let i = 0; i < style.length; i++) {
+            const name = style[i];
+            if (!name.startsWith('--')) continue;
+            const value = style.getPropertyValue(name).trim();
+            if (plain) {
+                customProps.set(name, value);
+                setProps.set(name, true);
+            } else if (!setProps.has(name)) {
+                // Theme variants / conditional overrides must not clobber the default value
+                if (!customProps.has(name)) customProps.set(name, value);
             }
         }
-    } catch (e) {}
+    }
 
-    // Fallback: check inline style on documentElement
-    const inlineStyle = document.documentElement.style;
-    for (let i = 0; i < inlineStyle.length; i++) {
-        const propName = inlineStyle[i];
-        if (propName.startsWith('--color-') || propName.startsWith('--theme-')) {
-            customProps[propName] = inlineStyle.getPropertyValue(propName).trim();
+    // Rule types: 1 = style rule; everything with cssRules (@layer, @media, @supports,
+    // @container, nested style rules) is recursed into.
+    function walkRules(rules, conditional, depth) {
+        if (!rules || depth > 12) return;
+        for (const rule of Array.from(rules)) {
+            if (rule.type === 1 && rule.selectorText !== undefined) {
+                const kinds = splitSelectors(rule.selectorText).map(rootKind).filter(Boolean);
+                if (kinds.length) {
+                    const plain = !conditional && kinds.includes('plain');
+                    recordProps(rule.style, plain);
+                }
+            }
+            if (rule.cssRules && rule.cssRules.length) {
+                // @media / @supports / @container carry a condition; @layer does not
+                const isConditional = conditional || !!rule.conditionText || !!rule.media;
+                walkRules(rule.cssRules, isConditional, depth + 1);
+            }
         }
     }
+
+    let blockedSheet = false;
+    for (const sheet of Array.from(document.styleSheets)) {
+        let rules = null;
+        try {
+            rules = sheet.cssRules;
+        } catch (e) {
+            blockedSheet = true;  // cross-origin stylesheet
+            continue;
+        }
+        try {
+            walkRules(rules, false, 0);
+        } catch (e) {}
+    }
+
+    // Inline style on documentElement (any custom property)
+    recordProps(document.documentElement.style, true);
+
+    // Cross-origin sheets cannot be read: Chromium lists custom properties when iterating the
+    // computed style declaration, so use it for names we have not already seen.
+    if (blockedSheet) {
+        try {
+            const computed = window.getComputedStyle(document.documentElement);
+            for (let i = 0; i < computed.length; i++) {
+                const name = computed[i];
+                if (!name.startsWith('--') || customProps.has(name)) continue;
+                const value = computed.getPropertyValue(name).trim();
+                if (value) customProps.set(name, value);
+            }
+        } catch (e) {}
+    }
+
+    function propPriority(name) {
+        const n = name.toLowerCase();
+        if (/color|colour|primary|secondary|accent|theme|background|bg|foreground|surface|brand/.test(n)) return 0;
+        if (/font|text|typography|leading|tracking/.test(n)) return 1;
+        if (/radius|rounded/.test(n)) return 2;
+        if (/shadow|elevation/.test(n)) return 3;
+        if (/spacing|space|gap|padding|margin|size/.test(n)) return 4;
+        return 5;
+    }
+    const sortedProps = Array.from(customProps.entries())
+        .map((entry, idx) => ({ entry, idx, pri: propPriority(entry[0]) }))
+        .sort((a, b) => a.pri - b.pri || a.idx - b.idx)
+        .slice(0, MAX_CUSTOM_PROPS);
+    const customPropsOut = {};
+    sortedProps.forEach(p => { customPropsOut[p.entry[0]] = p.entry[1]; });
 
     return {
         colors: {
@@ -262,7 +373,7 @@ HARVEST_TOKENS_JS = """
             dominant_border_radii: dominantRadii,
             box_shadows: dominantShadows
         },
-        custom_properties: customProps
+        custom_properties: customPropsOut
     };
 }
 """

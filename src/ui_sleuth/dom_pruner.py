@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import re
 from typing import Any
+from urllib.parse import urlsplit
 
 from lxml import html
 from lxml.html import HtmlElement
@@ -50,34 +51,73 @@ LANDMARK_TAGS: list[str] = [
 # Landmarks that are never pattern instances (always subsections); <article> may repeat as cards
 _NON_REPEATABLE_LANDMARKS: frozenset[str] = frozenset(LANDMARK_TAGS) - {"article"}
 
-# Tracking keywords in class, id, or src
-TRACKING_PATTERN = re.compile(
-    r"(pixel|beacon|analytics|telemetry|track|doubleclick|clarity|hotjar|facebook\.com/tr)",
-    re.IGNORECASE,
+# Known tracker hosts (matched as host suffix) and host+path prefixes
+_TRACKER_HOSTS: tuple[str, ...] = (
+    "doubleclick.net",
+    "google-analytics.com",
+    "googletagmanager.com",
+    "googleadservices.com",
+    "googlesyndication.com",
+    "bat.bing.com",
+    "clarity.ms",
+    "hotjar.com",
+    "hotjar.io",
+    "analytics.twitter.com",
+    "px.ads.linkedin.com",
+    "ads.linkedin.com",
+    "snap.licdn.com",
+    "segment.io",
+    "mixpanel.com",
+    "scorecardresearch.com",
+    "quantserve.com",
+    "adsrvr.org",
 )
+_TRACKER_HOST_PATHS: tuple[tuple[str, str], ...] = (("facebook.com", "/tr"),)
+
+_TINY_PX_RE = re.compile(r"^\s*(\d+(?:\.\d+)?)\s*(?:px)?\s*$")
+_STYLE_DIM_RE = re.compile(r"(?:^|;)\s*(width|height)\s*:\s*([^;]+)", re.IGNORECASE)
+_TINY_MAX_PX = 2.0
+
+
+def _tiny_px(value: str) -> bool:
+    match = _TINY_PX_RE.match(value)
+    return bool(match) and float(match.group(1)) <= _TINY_MAX_PX
+
+
+def _has_tiny_dimensions(el: HtmlElement) -> bool:
+    """True when every declared width/height (attrs, else inline style) is <= 2px."""
+    style_dims = {k.lower(): v for k, v in _STYLE_DIM_RE.findall(el.get("style", ""))}
+    dims = [el.get(name, "").strip() or style_dims.get(name, "") for name in ("width", "height")]
+    declared = [d for d in dims if d.strip()]
+    return bool(declared) and all(_tiny_px(d) for d in declared)
+
+
+def _is_tracker_url(src: str) -> bool:
+    try:
+        parsed = urlsplit(src.strip() if src.startswith(("http", "//")) else "")
+    except ValueError:
+        return False
+    host = (parsed.hostname or "").lower()
+    if not host:
+        return False
+    if any(host == h or host.endswith("." + h) for h in _TRACKER_HOSTS):
+        return True
+    path = parsed.path.lower()
+    return any(
+        (host == h or host.endswith("." + h)) and (path == p or path.startswith(p + "/"))
+        for h, p in _TRACKER_HOST_PATHS
+    )
 
 
 def is_tracking_pixel(el: HtmlElement) -> bool:
-    """Check if an image or element is a 1x1 tracking pixel or analytics beacon."""
+    """Check if an image is a tiny (<=2px) tracking pixel or served from a known tracker host.
+
+    Names like ``soundtrack-cover.jpg`` or ``class="track-image"`` are deliberately ignored.
+    """
     tag = el.tag.lower() if isinstance(el.tag, str) else ""
     if tag != "img":
         return False
-
-    width = el.get("width", "").strip()
-    height = el.get("height", "").strip()
-    if (width in {"0", "1"}) and (height in {"0", "1"}):
-        return True
-
-    style = el.get("style", "").lower()
-    if "display: none" in style or "display:none" in style or "visibility: hidden" in style:
-        return True
-
-    src = el.get("src", "")
-    if src and TRACKING_PATTERN.search(src):
-        return True
-
-    cls_or_id = f"{el.get('class', '')} {el.get('id', '')}"
-    return bool(TRACKING_PATTERN.search(cls_or_id))
+    return _has_tiny_dimensions(el) or _is_tracker_url(el.get("src", ""))
 
 
 def clean_dom_tree(root: HtmlElement) -> None:
@@ -164,27 +204,35 @@ def extract_interaction_metadata(el: HtmlElement) -> InteractionMetadata:
 
 def infer_pattern_name(el: HtmlElement, tag_signature: str) -> str:
     """Infer a high-level component pattern name from classes, attributes, or tag signature."""
-    cls_text = (el.get("class", "") + " " + el.get("id", "")).lower()
+    tokens = {
+        t for t in re.split(r"[-_\s]+", (el.get("class", "") + " " + el.get("id", "")).lower()) if t
+    }
 
-    if any(k in cls_text for k in ["testimonial", "review", "quote"]):
+    def has(*words: str) -> bool:
+        return any(w in tokens for w in words)
+
+    def has_pair(a: str, b: str) -> bool:
+        return a in tokens and b in tokens
+
+    if has("testimonial", "review", "quote"):
         return "TestimonialCard"
-    if any(k in cls_text for k in ["pricing", "plan", "tier", "subscription"]):
+    if has("pricing", "plan", "tier", "subscription"):
         return "PricingPlanCard"
-    if any(k in cls_text for k in ["sm-menu", "menu-card", "nav-card"]):
+    if has_pair("menu", "card") or has_pair("nav", "card") or has_pair("sm", "menu"):
         return "NavMenuCard"
-    if any(k in cls_text for k in ["menu-item", "nav-item", "toc-item"]):
+    if has_pair("menu", "item") or has_pair("nav", "item") or has_pair("toc", "item"):
         return "NavMenuItem"
-    if any(k in cls_text for k in ["product", "item", "catalog", "shop"]):
+    if has("product", "catalog", "shop"):
         return "ProductCard"
-    if any(k in cls_text for k in ["feature", "benefit", "service", "capability"]):
+    if has("feature", "benefit", "service", "capability"):
         return "FeatureCard"
-    if any(k in cls_text for k in ["team", "member", "author", "person"]):
+    if has("team", "member", "author", "person"):
         return "TeamMemberCard"
-    if any(k in cls_text for k in ["post", "blog", "article", "news"]):
+    if has("post", "blog", "article", "news"):
         return "ArticleCard"
-    if any(k in cls_text for k in ["faq", "accordion", "question"]):
+    if has("faq", "accordion", "question"):
         return "FaqItem"
-    if any(k in cls_text for k in ["metric", "stat", "counter"]):
+    if has("metric", "stat", "counter"):
         return "MetricCard"
     if el.tag.lower() == "li":
         return "ListItem"

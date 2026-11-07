@@ -98,3 +98,38 @@ def test_synthesize_production_assets_3d_and_video():
     interactive_video = video_assets[1]
     assert interactive_video.details["is_background_loop"] is False
     assert "Interactive Video Player" in interactive_video.suggested_react_wrapper
+
+
+def _models(urls: list[str]):
+    collector = NetworkAssetCollector()
+    for url in urls:
+        collector.handle_response(DummyResponse(url, 200))
+    assets = synthesize_production_assets(collector, {})
+    return next((a for a in assets if a.category == "3d_model"), None)
+
+
+def test_bin_alone_is_not_3d():
+    assert _models(["https://example.com/data/blob.bin"]) is None
+
+
+def test_bin_counts_with_gltf_in_any_order():
+    gltf = "https://example.com/m/scene.gltf"
+    buf = "https://example.com/m/scene.bin"
+    for order in ([gltf, buf], [buf, gltf]):
+        asset = _models(order)
+        assert asset is not None
+        assert set(asset.direct_asset_urls) == {gltf, buf}
+
+
+def test_bin_ignored_with_glb_only():
+    asset = _models(["https://example.com/a.glb", "https://example.com/a.bin"])
+    assert asset is not None
+    assert asset.direct_asset_urls == ["https://example.com/a.glb"]
+
+
+def test_rive_with_query_string_uses_rive_wrapper():
+    collector = NetworkAssetCollector()
+    collector.handle_response(DummyResponse("https://example.com/scene.riv?v=3", 200))
+    assets = synthesize_production_assets(collector, {})
+    motion = next(a for a in assets if a.category != "rich_video" and "Rive" in a.detected_engines)
+    assert "rive" in motion.suggested_react_wrapper.lower()

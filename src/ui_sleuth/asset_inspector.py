@@ -16,7 +16,9 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 # File extension patterns
-PATTERN_3D = re.compile(r"\.(gltf|glb|splinecode|usdz|fbx|bin|obj)($|\?)", re.IGNORECASE)
+PATTERN_3D = re.compile(r"\.(gltf|glb|splinecode|usdz|fbx|obj)($|\?)", re.IGNORECASE)
+# ``.bin`` is only a 3D buffer when paired with a ``.gltf``; resolved at synthesis time.
+PATTERN_BIN = re.compile(r"\.bin($|\?)", re.IGNORECASE)
 PATTERN_MOTION = re.compile(r"\.(riv|lottie)($|\?)", re.IGNORECASE)
 PATTERN_VIDEO = re.compile(r"\.(mp4|webm|m3u8|mpd|mov)($|\?)", re.IGNORECASE)
 PATTERN_LOTTIE_JSON = re.compile(r"\.json($|\?)", re.IGNORECASE)
@@ -122,6 +124,7 @@ class NetworkAssetCollector:
 
     def __init__(self) -> None:
         self.assets_3d: list[str] = []
+        self.assets_bin: list[str] = []
         self.assets_motion: list[str] = []
         self.assets_video: list[str] = []
         self.all_responses: list[dict[str, Any]] = []
@@ -144,6 +147,12 @@ class NetworkAssetCollector:
                     "content_type": content_type,
                 }
             )
+
+            # Candidate glTF buffers; only counted when a .gltf is also loaded (see below)
+            if PATTERN_BIN.search(url):
+                if url not in self.assets_bin:
+                    self.assets_bin.append(url)
+                return
 
             # Check 3D models
             if (PATTERN_3D.search(url) or "model/gltf" in content_type) and (
@@ -189,6 +198,18 @@ def inspect_canvas_and_video(page: Page) -> dict[str, Any]:
     return {"detected_window_engines": [], "canvases": [], "videos": []}
 
 
+def resolve_3d_assets(network_collector: NetworkAssetCollector) -> list[str]:
+    """Return 3D asset URLs, adding ``.bin`` buffers only if a ``.gltf`` was loaded.
+
+    Evaluated on the final collector state so the result is independent of response order.
+    """
+    models = list(network_collector.assets_3d)
+    has_gltf = any(urlparse(u).path.lower().endswith(".gltf") for u in models)
+    if has_gltf:
+        models.extend(u for u in network_collector.assets_bin if u not in models)
+    return models
+
+
 def synthesize_production_assets(
     network_collector: NetworkAssetCollector,
     dom_probe: dict[str, Any],
@@ -200,11 +221,9 @@ def synthesize_production_assets(
     videos: list[dict[str, Any]] = dom_probe.get("videos", [])
 
     # 1. 3D Model Assets
-    if network_collector.assets_3d:
-        has_spline = (
-            any("splinecode" in u for u in network_collector.assets_3d)
-            or "Spline" in window_engines
-        )
+    models = resolve_3d_assets(network_collector)
+    if models:
+        has_spline = any("splinecode" in u for u in models) or "Spline" in window_engines
         has_three = "Three.js" in window_engines or not has_spline
 
         engines: list[str] = []
@@ -229,17 +248,12 @@ def synthesize_production_assets(
             ExternalProductionAsset(
                 category="3d_model",
                 detected_engines=engines,
-                direct_asset_urls=list(network_collector.assets_3d),
+                direct_asset_urls=list(models),
                 parent_landmark=parent_lm,
                 suggested_react_wrapper=suggested_wrapper,
                 details={
-                    "total_models_detected": len(network_collector.assets_3d),
-                    "file_types": list(
-                        {
-                            urlparse(u).path.split(".")[-1].lower()
-                            for u in network_collector.assets_3d
-                        }
-                    ),
+                    "total_models_detected": len(models),
+                    "file_types": list({urlparse(u).path.split(".")[-1].lower() for u in models}),
                 },
             )
         )
@@ -247,7 +261,7 @@ def synthesize_production_assets(
     # 2. Vector Motion & Runtimes (Rive / Lottie)
     if network_collector.assets_motion:
         has_rive = (
-            any(u.endswith(".riv") for u in network_collector.assets_motion)
+            any(urlparse(u).path.lower().endswith(".riv") for u in network_collector.assets_motion)
             or "Rive" in window_engines
         )
         has_lottie = any("lottie" in u.lower() for u in network_collector.assets_motion) or (

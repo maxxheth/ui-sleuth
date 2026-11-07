@@ -166,7 +166,7 @@ Options:
       --proxy-env               Use PROXY_FILE / HTTPS_PROXY / HTTP_PROXY from the environment
       --no-proxy                Force a direct connection
       --stealth                 Use StealthyFetcher to bypass Cloudflare
-  -f, --format <str>            Output format: 'all', 'json', 'markdown', or 'yaml' [default: all]
+  -f, --format <str>            Output format: all, json, markdown (alias: md), yaml (alias: yml); invalid values are rejected [default: all]
       --headless / --no-headless Run browser in headless or visible mode [default: headless]
       --real-chrome / --no-real-chrome Use installed Google Chrome executable
   -d, --delay <float>           Post-load stabilization delay in seconds [default: 2.0]
@@ -198,7 +198,7 @@ Options:
       --proxy-env               Use PROXY_FILE / HTTPS_PROXY / HTTP_PROXY from the environment
       --no-proxy                Force a direct connection
       --stealth                 Use StealthyFetcher to bypass Cloudflare
-  -f, --format <str>            Output format: 'all', 'json', 'markdown', or 'yaml' [default: all]
+  -f, --format <str>            Output format: all, json, markdown (alias: md), yaml (alias: yml); invalid values are rejected [default: all]
       --headless / --no-headless Run browser in headless or visible mode [default: headless]
       --real-chrome / --no-real-chrome Use installed Google Chrome executable
   -d, --delay <float>           Post-load stabilization delay in seconds [default: 2.0]

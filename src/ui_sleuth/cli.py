@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from enum import StrEnum
 from pathlib import Path
 from typing import Annotated
 
@@ -28,6 +29,26 @@ app = typer.Typer(
 )
 
 console = Console()
+
+
+class OutputFormat(StrEnum):
+    """Accepted values for --format."""
+
+    all = "all"
+    json = "json"
+    markdown = "markdown"
+    md = "md"
+    yaml = "yaml"
+    yml = "yml"
+
+
+def _format_flags(fmt: OutputFormat) -> tuple[bool, bool, bool]:
+    """Return (json, markdown, yaml) export flags for a format."""
+    return (
+        fmt in {OutputFormat.all, OutputFormat.json},
+        fmt in {OutputFormat.all, OutputFormat.markdown, OutputFormat.md},
+        fmt in {OutputFormat.all, OutputFormat.yaml, OutputFormat.yml},
+    )
 
 
 def setup_logging(verbose: bool = False) -> None:
@@ -79,7 +100,7 @@ def _execute_multi_page_crawl(
     auto_scroll: bool,
     explore: bool,
     screenshot: bool,
-    fmt: str,
+    fmt: OutputFormat,
     verbose: bool,
 ) -> None:
     """Execute multi-page site crawl and display consolidated design system report."""
@@ -126,9 +147,16 @@ def _execute_multi_page_crawl(
             console.print_exception()
         raise typer.Exit(code=1) from e
 
-    do_json = fmt in {"all", "json"}
-    do_md = fmt in {"all", "markdown", "md"}
-    do_yaml = fmt in {"all", "yaml", "yml"}
+    failures = crawl_result.failed_pages
+    if crawl_result.design_system.total_pages_crawled == 0:
+        console.print(
+            f"[bold red]Crawl failed:[/bold red] no pages could be extracted from {escape(target_url)}"
+        )
+        for fp in failures:
+            console.print(f"  - {escape(fp.url)}: {escape(fp.error)}")
+        raise typer.Exit(code=1)
+
+    do_json, do_md, do_yaml = _format_flags(fmt)
 
     saved = export_site_design_system(
         crawl_result=crawl_result,
@@ -185,6 +213,14 @@ def _execute_multi_page_crawl(
     console.print("\n[bold green]Design System Artifacts successfully saved:[/bold green]")
     for kind, path in saved.items():
         console.print(f"  • [{kind.upper()}] [link=file://{path.resolve()}]{path}[/link]")
+
+    if failures:
+        console.print(
+            f"\n[bold yellow]Warning:[/bold yellow] {len(failures)} page(s) failed "
+            f"({crawl_result.design_system.total_pages_crawled} succeeded):"
+        )
+        for fp in failures:
+            console.print(f"  - {escape(fp.url)}: {escape(fp.error)}")
 
 
 @app.command()
@@ -260,9 +296,13 @@ def extract(
         ),
     ] = False,
     fmt: Annotated[
-        str,
-        typer.Option("--format", "-f", help="Output format: 'all', 'json', 'markdown', or 'yaml'"),
-    ] = "all",
+        OutputFormat,
+        typer.Option(
+            "--format",
+            "-f",
+            help="Output format: all, json, markdown (alias: md), yaml (alias: yml)",
+        ),
+    ] = OutputFormat.all,
     headless: Annotated[
         bool,
         typer.Option("--headless/--no-headless", help="Run browser in headless or visible mode"),
@@ -414,9 +454,7 @@ def extract(
         raise typer.Exit(code=1) from e
 
     # 4. Export blueprint artifacts
-    do_json = fmt in {"all", "json"}
-    do_md = fmt in {"all", "markdown", "md"}
-    do_yaml = fmt in {"all", "yaml", "yml"}
+    do_json, do_md, do_yaml = _format_flags(fmt)
 
     saved = export_blueprint(
         blueprint=blueprint,
@@ -551,9 +589,13 @@ def crawl(
         ),
     ] = False,
     fmt: Annotated[
-        str,
-        typer.Option("--format", "-f", help="Output format: 'all', 'json', 'markdown', or 'yaml'"),
-    ] = "all",
+        OutputFormat,
+        typer.Option(
+            "--format",
+            "-f",
+            help="Output format: all, json, markdown (alias: md), yaml (alias: yml)",
+        ),
+    ] = OutputFormat.all,
     headless: Annotated[
         bool,
         typer.Option("--headless/--no-headless", help="Run browser in headless or visible mode"),

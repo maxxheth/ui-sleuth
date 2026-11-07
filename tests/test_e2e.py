@@ -5,6 +5,8 @@ import socketserver
 import threading
 from pathlib import Path
 
+import pytest
+
 from ui_sleuth.exporter import export_blueprint
 from ui_sleuth.scrapling_engine import ScraplingEngine
 
@@ -115,6 +117,7 @@ class MockServerHandler(http.server.SimpleHTTPRequestHandler):
         pass
 
 
+@pytest.mark.browser
 def test_e2e_scrapling_engine(tmp_path: Path):
     # Start local server on available port
     server = socketserver.TCPServer(("127.0.0.1", 0), MockServerHandler)
@@ -131,7 +134,7 @@ def test_e2e_scrapling_engine(tmp_path: Path):
             wait_until="load",
             timeout=10,
             viewport="1440x900",
-            real_chrome=True,
+            real_chrome=False,  # bundled Chromium; no Google Chrome needed
             headless=True,
             screenshot_path=screenshot_file,
         )

@@ -223,3 +223,47 @@ def test_kinetic_micro_interactions_detection():
     assert "Interactive Custom Cursor & Floating Card Preview" in md
     assert "Typographic SplitText Cascade" in md
     assert "Dynamic Hover Media Switcher" in md
+
+
+def test_malformed_and_nan_probe_entries_do_not_raise():
+    from unittest.mock import MagicMock
+
+    from ui_sleuth.feature_detector import detect_and_explore_features
+
+    nan, inf = float("nan"), float("inf")
+    probe = {
+        "detected_engines": ["gsap", 5, None],
+        "sticky_tracks": [
+            None,
+            "junk",
+            {"description": "no selector"},
+            {"selector": ".ok", "dimensions": {"height": nan, "width": 100.7, "top": inf}},
+            {"selector": ".bad-dims", "dimensions": "oops", "stickyHeight": nan},
+        ],
+        "offscreen_drawers": {"not": "a list"},
+        "marquees": [{"selector": ".m", "name": 3, "dimensions": {"height": -inf}}],
+        "scroll_parallaxes": [{"selector": ".p", "dimensions": {"x": True}}],
+        "hover_media_switchers": [{"target_selector": ".t"}],
+    }
+    page = MagicMock()
+    page.evaluate.return_value = probe
+    summary = detect_and_explore_features(page)
+
+    by_selector = {f.selector: f for f in summary.features}
+    assert set(by_selector) == {"window", ".ok", ".bad-dims", ".m", ".p"}
+    assert by_selector["window"].details == {"engines": ["gsap"]}
+    assert by_selector[".ok"].dimensions == {"width": 100}
+    assert by_selector[".bad-dims"].dimensions == {}
+    assert by_selector[".bad-dims"].details["stickyHeight"] is None
+    assert by_selector[".m"].dimensions == {}
+    assert by_selector[".p"].dimensions == {}
+
+
+def test_non_dict_probe_result_returns_empty_summary():
+    from unittest.mock import MagicMock
+
+    from ui_sleuth.feature_detector import detect_and_explore_features
+
+    page = MagicMock()
+    page.evaluate.return_value = None
+    assert detect_and_explore_features(page).features == []

@@ -5,6 +5,7 @@ from __future__ import annotations
 import datetime
 import ipaddress
 import logging
+import os
 import shutil
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -46,8 +47,19 @@ def parse_viewport(viewport_str: str) -> dict[str, int]:
 
 
 def is_chrome_installed() -> bool:
-    """Check if real Chrome/Chromium executable is available on the system."""
-    return bool(shutil.which("google-chrome") or shutil.which("chromium") or shutil.which("chrome"))
+    """Check whether Google Chrome (not Chromium) is installed.
+
+    Playwright's ``channel="chrome"`` needs Google Chrome specifically. A bare ``chrome``
+    command on PATH is ambiguous (it is sometimes a Chromium alias), so it is ignored.
+    """
+    if shutil.which("google-chrome") or shutil.which("google-chrome-stable"):
+        return True
+    candidates = [Path("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome")]
+    for env in ("ProgramFiles", "ProgramFiles(x86)", "LOCALAPPDATA"):
+        base = os.environ.get(env)
+        if base:
+            candidates.append(Path(base) / "Google" / "Chrome" / "Application" / "chrome.exe")
+    return any(path.is_file() for path in candidates)
 
 
 # Init script that tags every canvas with the context type the page created (non-destructive)
@@ -207,8 +219,21 @@ class ScraplingEngine:
         self.collector = NetworkAssetCollector()
         self._action_data: dict[str, Any] = {}
 
+    def _warn(self, step: str, exc: BaseException | str) -> None:
+        """Record a non-fatal step failure (short message) for SiteMetadata.warnings."""
+        if isinstance(exc, BaseException):
+            detail = " ".join(f"{type(exc).__name__}: {exc}".split())
+        else:
+            detail = exc
+        message = f"{step}: {detail[:200]}"
+        logger.warning("Extraction step failed (%s)", message)
+        self._action_data.setdefault("warnings", []).append(message)
+
     def _page_setup(self, page: Page) -> None:
         """Hook into Playwright page session prior to navigation to attach network listeners."""
+        # Scrapling retries call this on a fresh page: discard state from failed attempts
+        self.collector = NetworkAssetCollector()
+        self._action_data = {}
         try:
             # Attach network interception listener for runtime 3D/video/motion assets
             page.on("response", self.collector.handle_response)
@@ -231,51 +256,78 @@ class ScraplingEngine:
         except Exception as e:
             logger.warning("Error during page_setup hook: %s", e)
 
+    def _is_selector_wait(self) -> bool:
+        return self.wait_until.lower() not in ("networkidle", "load")
+
     def _page_action(self, page: Page) -> None:
-        """Execute post-navigation evaluations and capture screenshot while session is alive."""
-        try:
-            # 1. Progressive auto-scroll hydration for lazy images, fonts, and scroll triggers
-            if self.auto_scroll:
-                try:
-                    logger.debug("Executing progressive auto-scroll page hydration...")
-                    page.evaluate(HYDRATE_PAGE_JS, {"maxMs": min(self.timeout_ms // 2, 15000)})
-                except Exception as e:
-                    logger.debug("Page hydration evaluation encountered error: %s", e)
+        """Execute post-navigation evaluations and capture screenshot while session is alive.
 
-            # 2. Configurable post-load delay for animation stabilization
-            if self.delay > 0:
+        Every step is isolated: a failure is recorded as a warning and later steps still run.
+        """
+        # 0. Custom selector wait (scrapling would only wait after page_action returns)
+        if self._is_selector_wait():
+            try:
+                page.wait_for_selector(self.wait_until, state="visible", timeout=self.timeout_ms)
+            except Exception as e:
+                self._warn("wait_selector", e)
+
+        # 1. Progressive auto-scroll hydration for lazy images, fonts, and scroll triggers
+        if self.auto_scroll:
+            try:
+                logger.debug("Executing progressive auto-scroll page hydration...")
+                page.evaluate(HYDRATE_PAGE_JS, {"maxMs": min(self.timeout_ms // 2, 15000)})
+            except Exception as e:
+                self._warn("hydration", e)
+
+        # 2. Configurable post-load delay for animation stabilization
+        if self.delay > 0:
+            try:
                 page.wait_for_timeout(int(self.delay * 1000))
+            except Exception as e:
+                self._warn("settle_delay", e)
 
-            # 3. Harvest design tokens (now sampled on fully hydrated elements)
+        # 3. Harvest design tokens (now sampled on fully hydrated elements)
+        try:
             tokens: DesignTokens = harvest_design_tokens(page)
             self._action_data["tokens"] = tokens
+        except Exception as e:
+            self._warn("design_tokens", e)
 
-            # 4. Probe canvas runtime engines and video playback diagnostics
-            dom_probe = inspect_canvas_and_video(page)
-            self._action_data["dom_probe"] = dom_probe
+        # 4. Probe canvas runtime engines and video playback diagnostics
+        try:
+            self._action_data["dom_probe"] = inspect_canvas_and_video(page)
+        except Exception as e:
+            self._warn("asset_probe", e)
 
-            # 5. Probe and explore sophisticated interactive features
-            features_summary = detect_and_explore_features(page, explore=self.explore_features)
-            self._action_data["sophisticated_features"] = features_summary
+        # 5. Probe and explore sophisticated interactive features
+        try:
+            self._action_data["sophisticated_features"] = detect_and_explore_features(
+                page, explore=self.explore_features
+            )
+        except Exception as e:
+            self._warn("feature_detection", e)
 
-            # 6. Page title and meta description
-            title = page.title() or ""
-            meta_desc = None
+        # 6. Page title and meta description
+        try:
+            self._action_data["title"] = page.title() or ""
+        except Exception as e:
+            self._warn("title", e)
+        try:
             desc_handle = page.query_selector('meta[name="description"]')
             if desc_handle:
-                meta_desc = desc_handle.get_attribute("content")
-            self._action_data["title"] = title
-            self._action_data["description"] = meta_desc
+                self._action_data["description"] = desc_handle.get_attribute("content")
+        except Exception as e:
+            self._warn("meta_description", e)
 
-            # 7. Capture full-page screenshot
-            if self.screenshot_path:
+        # 7. Capture full-page screenshot
+        if self.screenshot_path:
+            try:
                 self.screenshot_path.parent.mkdir(parents=True, exist_ok=True)
                 page.screenshot(path=str(self.screenshot_path), full_page=True)
                 self._action_data["screenshot_saved"] = str(self.screenshot_path)
                 logger.info("Saved full-page screenshot to %s", self.screenshot_path)
-
-        except Exception as e:
-            logger.warning("Error during page_action hook: %s", e)
+            except Exception as e:
+                self._warn("screenshot", e)
 
     def execute(self) -> SiteBlueprint:
         """Execute extraction pipeline and produce validated SiteBlueprint."""
@@ -312,8 +364,8 @@ class ScraplingEngine:
             fetch_kwargs["network_idle"] = False
             fetch_kwargs["load_dom"] = True
         else:
-            # Custom CSS selector to wait for (preserves exact case)
-            fetch_kwargs["wait_selector"] = self.wait_until
+            # Custom CSS selector: awaited at the start of _page_action (scrapling would
+            # only wait after page_action, i.e. after extraction)
             fetch_kwargs["load_dom"] = True
 
         # Proxy integration (supports single Decodo proxy or Decodo round-robin rotator)
@@ -360,6 +412,7 @@ class ScraplingEngine:
             status_code=status_code,
             wait_condition_used=self.wait_until,
             proxy_used=self.proxy_config.get_display_summary(),
+            warnings=list(self._action_data.get("warnings", [])),
         )
 
         return SiteBlueprint(

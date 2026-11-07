@@ -19,6 +19,7 @@ from ui_sleuth.models import (
     CrawledPageSummary,
     DesignTokens,
     ExternalProductionAsset,
+    FailedPage,
     HeaderScale,
     MultiPageCrawlResult,
     PatternSchema,
@@ -228,6 +229,19 @@ def extract_links_from_html(html_text: str, base_url: str) -> list[tuple[str, st
     return links
 
 
+_CRED_URL_RE = re.compile(r"([a-zA-Z][a-zA-Z0-9+.-]*://)[^/\s@]*@")
+_MAX_ERROR_LEN = 200
+
+
+def _summarize_error(exc: BaseException) -> str:
+    """Short 'Type: message' summary with URL credentials scrubbed."""
+    text = " ".join(f"{type(exc).__name__}: {exc}".split())
+    text = _CRED_URL_RE.sub(r"\1***@", text)
+    if len(text) > _MAX_ERROR_LEN:
+        text = text[: _MAX_ERROR_LEN - 3] + "..."
+    return text
+
+
 class SiteCrawler:
     """Intelligent multi-page crawler and cross-page design system synthesizer."""
 
@@ -277,6 +291,7 @@ class SiteCrawler:
         visited: set[str] = set()
         queued: set[str] = {self.entry_url}
         page_blueprints: dict[str, SiteBlueprint] = {}
+        failed_pages: list[FailedPage] = []
 
         # Queue items: (priority_score, depth, url)
         # Entry URL has highest priority (1000)
@@ -346,7 +361,9 @@ class SiteCrawler:
                             url_queue.append((score, depth + 1, link_url))
 
             except Exception as e:
-                logger.error("Failed to extract page %s: %s", current_url, e)
+                error = _summarize_error(e)
+                logger.error("Failed to extract page %s: %s", current_url, error)
+                failed_pages.append(FailedPage(url=current_url, error=error))
 
         # Synthesize global design system from all collected blueprints
         now_iso = datetime.datetime.now(datetime.UTC).isoformat()
@@ -356,6 +373,7 @@ class SiteCrawler:
             design_system=design_system,
             pages=page_blueprints,
             crawl_timestamp=now_iso,
+            failed_pages=failed_pages,
         )
 
     def synthesize_design_system(

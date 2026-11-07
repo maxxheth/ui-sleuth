@@ -891,6 +891,7 @@ def export_site_design_system(
             "total_pages_crawled": ds.total_pages_crawled,
             "timestamp": crawl_result.crawl_timestamp,
             "pages": [p.model_dump() for p in ds.pages],
+            "failed_pages": [fp.model_dump() for fp in crawl_result.failed_pages],
         }
         manifest_file.write_text(json.dumps(manifest_data, indent=2), encoding="utf-8")
         saved_paths["manifest_json"] = manifest_file

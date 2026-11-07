@@ -345,3 +345,68 @@ def test_cli_extract_crawl_option():
 def test_crawler_entry_url_canonicalization():
     crawler = SiteCrawler("https://example.com")
     assert crawler.entry_url == "https://example.com/"
+
+
+def _patch_engine(monkeypatch, failing_urls):
+    from ui_sleuth import crawler as crawler_mod
+
+    class FakeEngine:
+        def __init__(self, url, **kwargs):
+            self.url = url
+
+        def execute(self):
+            if failing_urls is None or self.url in failing_urls:
+                raise RuntimeError(f"boom via http://user:secretpw@proxy.local:8080 {'x' * 500}")
+            return create_mock_blueprint(self.url, "T", ["#112233"], "Inter")
+
+    monkeypatch.setattr(crawler_mod, "ScraplingEngine", FakeEngine)
+
+
+def test_crawl_all_pages_fail_records_failures_and_cli_exits_1(monkeypatch, tmp_path):
+    _patch_engine(monkeypatch, None)
+    result = runner.invoke(
+        app, ["crawl", "https://example.com", "-o", str(tmp_path / "o"), "--max-pages", "2"]
+    )
+    assert result.exit_code == 1
+    assert "no pages could be extracted" in result.stdout
+    assert "RuntimeError" in result.stdout
+    assert "secretpw" not in result.stdout
+
+
+def test_crawler_failed_pages_are_short_and_redacted(monkeypatch, tmp_path):
+    _patch_engine(monkeypatch, None)
+    res = SiteCrawler("https://example.com", max_pages=1, output_dir=tmp_path).crawl()
+    assert res.design_system.total_pages_crawled == 0
+    assert len(res.failed_pages) == 1
+    err = res.failed_pages[0].error
+    assert err.startswith("RuntimeError:")
+    assert "secretpw" not in err
+    assert len(err) <= 200
+
+
+def test_crawl_partial_failure_exit_0_and_manifest(monkeypatch, tmp_path):
+    import json
+
+    _patch_engine(monkeypatch, {"https://example.com/bad"})
+    crawler = SiteCrawler("https://example.com", max_pages=2, output_dir=tmp_path)
+    # Seed a second page into the queue by patching link discovery.
+    from ui_sleuth import crawler as crawler_mod
+
+    monkeypatch.setattr(
+        crawler_mod,
+        "extract_links_from_html",
+        lambda html, base: [("https://example.com/bad", "bad", 1.0)],
+    )
+    monkeypatch.setattr(
+        crawler_mod.ScraplingEngine,
+        "_action_data",
+        {"raw_html": "<a href='/bad'>x</a>"},
+        raising=False,
+    )
+    res = crawler.crawl()
+    assert res.design_system.total_pages_crawled == 1
+    assert [f.url for f in res.failed_pages] == ["https://example.com/bad"]
+    saved = export_site_design_system(res, tmp_path / "out")
+    manifest = json.loads(saved["manifest_json"].read_text())
+    assert manifest["failed_pages"][0]["url"] == "https://example.com/bad"
+    assert "secretpw" not in json.dumps(manifest)

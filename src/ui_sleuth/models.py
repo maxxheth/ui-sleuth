@@ -290,6 +290,10 @@ class SiteMetadata(BaseModel):
         default=None,
         description="Redacted proxy endpoint used (if proxy was configured)",
     )
+    warnings: list[str] = Field(
+        default_factory=list,
+        description="Non-fatal extraction step failures (step name and short error)",
+    )
 
 
 class SiteBlueprint(BaseModel):
@@ -430,6 +434,13 @@ class SiteDesignSystem(BaseModel):
     )
 
 
+class FailedPage(BaseModel):
+    """A page that could not be extracted during a crawl."""
+
+    url: str
+    error: str = Field(description="Short, credential-free error summary")
+
+
 class MultiPageCrawlResult(BaseModel):
     """Complete multi-page crawl result combining the unified design system and individual page blueprints."""
 
@@ -439,3 +450,7 @@ class MultiPageCrawlResult(BaseModel):
         description="Mapping of page URL to complete SiteBlueprint",
     )
     crawl_timestamp: str = Field(description="ISO 8601 execution timestamp")
+    failed_pages: list[FailedPage] = Field(
+        default_factory=list,
+        description="Pages that failed extraction, with short error summaries",
+    )

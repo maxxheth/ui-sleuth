@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import math
 from typing import Any
 
 from playwright.sync_api import Page
@@ -490,6 +491,50 @@ PROBE_SOPHISTICATED_FEATURES_JS = """
 """.replace("() => {", "() => {" + CANVAS_CONTEXT_HELPER_JS, 1)
 
 
+def _coerce_int(value: Any) -> int | None:
+    """Coerce a probe number to int; None for bool, NaN, +/-Infinity or non-numerics."""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        if isinstance(value, float) and not math.isfinite(value):
+            return None
+        return int(value)
+    return None
+
+
+def _clean_dims(value: Any) -> dict[str, int]:
+    """Return only finite numeric dimension entries as ints (drops malformed ones)."""
+    if not isinstance(value, dict):
+        return {}
+    out: dict[str, int] = {}
+    for key, raw in value.items():
+        num = _coerce_int(raw)
+        if isinstance(key, str) and num is not None:
+            out[key] = num
+    return out
+
+
+def _entries(
+    raw_probe: dict[str, Any], key: str, required: str = "selector"
+) -> list[dict[str, Any]]:
+    """Return well-formed (dict with a string `required` key) entries; skip the rest."""
+    raw = raw_probe.get(key)
+    if not isinstance(raw, list):
+        return []
+    good: list[dict[str, Any]] = []
+    for entry in raw:
+        if isinstance(entry, dict) and isinstance(entry.get(required), str):
+            good.append(entry)
+        else:
+            logger.debug("Skipping malformed %s probe entry: %.80r", key, entry)
+    return good
+
+
+def _text(entry: dict[str, Any], key: str, default: str = "") -> str:
+    value = entry.get(key)
+    return value if isinstance(value, str) else default
+
+
 def detect_and_explore_features(
     page: Page,
     explore: bool = True,
@@ -509,7 +554,12 @@ def detect_and_explore_features(
     features: list[SophisticatedFeature] = []
     recommended: list[str] = []
 
-    detected_engines = raw_probe.get("detected_engines", [])
+    if not isinstance(raw_probe, dict):  # pyright: ignore[reportUnnecessaryIsInstance]
+        raw_probe = {}
+    engines_raw = raw_probe.get("detected_engines")
+    detected_engines = (
+        [e for e in engines_raw if isinstance(e, str)] if isinstance(engines_raw, list) else []
+    )
     if detected_engines:
         features.append(
             SophisticatedFeature(
@@ -529,38 +579,38 @@ def detect_and_explore_features(
         )
 
     # Sticky tracks
-    sticky_tracks = raw_probe.get("sticky_tracks", [])
+    sticky_tracks = _entries(raw_probe, "sticky_tracks")
     for track in sticky_tracks:
         features.append(
             SophisticatedFeature(
                 category="sticky_scroll_track",
-                name=track["name"],
+                name=_text(track, "name", track.get("selector", "")),
                 selector=track["selector"],
-                description=track["description"],
-                dimensions=track["dimensions"],
+                description=_text(track, "description"),
+                dimensions=_clean_dims(track.get("dimensions")),
                 requires_independent_exploration=True,
                 exploration_status="explored" if explore else "detected",
                 suggested_implementation="Replicate with CSS `position: sticky; top: 0` container inside a relative scroll track, or Framer Motion `useScroll()` with sequence steps.",
                 details={
-                    "stickyHeight": track.get("stickyHeight"),
-                    "childItemsCount": track.get("childItemsCount"),
+                    "stickyHeight": _coerce_int(track.get("stickyHeight")),
+                    "childItemsCount": _coerce_int(track.get("childItemsCount")),
                 },
             )
         )
         recommended.append(
-            f"Explore {track['selector']}: Pinned scene spanning {track['dimensions'].get('height', 0)}px scroll track. Do not flatten into static cards; preserve sticky phase-switching."
+            f"Explore {track['selector']}: Pinned scene spanning {_clean_dims(track.get('dimensions')).get('height', 0)}px scroll track. Do not flatten into static cards; preserve sticky phase-switching."
         )
 
     # Offscreen drawers & modals
-    drawers = raw_probe.get("offscreen_drawers", [])
+    drawers = _entries(raw_probe, "offscreen_drawers")
     for drawer in drawers:
         features.append(
             SophisticatedFeature(
                 category="offscreen_drawer",
-                name=drawer["name"],
+                name=_text(drawer, "name", drawer.get("selector", "")),
                 selector=drawer["selector"],
-                description=drawer["description"],
-                dimensions=drawer["dimensions"],
+                description=_text(drawer, "description"),
+                dimensions=_clean_dims(drawer.get("dimensions")),
                 requires_independent_exploration=True,
                 exploration_status="explored" if explore else "detected",
                 suggested_implementation="Implement as an isolated Dialog/Drawer component (e.g. Radix UI Dialog or Vaul drawer) triggered by card click.",
@@ -571,19 +621,19 @@ def detect_and_explore_features(
             )
         )
         recommended.append(
-            f"Explore {drawer['selector']}: Deep off-screen drawer container ({drawer['dimensions'].get('height', 0)}px tall) holding dynamic case study or form details."
+            f"Explore {drawer['selector']}: Deep off-screen drawer container ({_clean_dims(drawer.get('dimensions')).get('height', 0)}px tall) holding dynamic case study or form details."
         )
 
     # Interactive disclosures
-    disclosures = raw_probe.get("disclosures", [])
+    disclosures = _entries(raw_probe, "disclosures")
     for disc in disclosures:
         features.append(
             SophisticatedFeature(
                 category="interactive_disclosure",
-                name=disc["name"],
+                name=_text(disc, "name", disc.get("selector", "")),
                 selector=disc["selector"],
-                description=disc["description"],
-                dimensions=disc["dimensions"],
+                description=_text(disc, "description"),
+                dimensions=_clean_dims(disc.get("dimensions")),
                 requires_independent_exploration=False,
                 exploration_status="explored",
                 suggested_implementation="Implement using `@radix-ui/react-accordion` or HTML5 `<details>` with Framer Motion `AnimatePresence` height animation.",
@@ -592,15 +642,15 @@ def detect_and_explore_features(
         )
 
     # Marquees
-    marquees = raw_probe.get("marquees", [])
+    marquees = _entries(raw_probe, "marquees")
     for mq in marquees:
         features.append(
             SophisticatedFeature(
                 category="marquee_stream",
-                name=mq["name"],
+                name=_text(mq, "name", mq.get("selector", "")),
                 selector=mq["selector"],
-                description=mq["description"],
-                dimensions=mq["dimensions"],
+                description=_text(mq, "description"),
+                dimensions=_clean_dims(mq.get("dimensions")),
                 requires_independent_exploration=False,
                 exploration_status="explored",
                 suggested_implementation="Replicate with CSS infinite marquee animation (`@keyframes marquee { 0% { transform: translateX(0); } 100% { transform: translateX(-50%); } }`) with duplicated items.",
@@ -609,15 +659,15 @@ def detect_and_explore_features(
         )
 
     # Canvases
-    canvases = raw_probe.get("canvases", [])
+    canvases = _entries(raw_probe, "canvases")
     for c in canvases:
         features.append(
             SophisticatedFeature(
                 category="webgl_canvas",
-                name=c["name"],
+                name=_text(c, "name", c.get("selector", "")),
                 selector=c["selector"],
-                description=c["description"],
-                dimensions=c["dimensions"],
+                description=_text(c, "description"),
+                dimensions=_clean_dims(c.get("dimensions")),
                 requires_independent_exploration=True,
                 exploration_status="explored",
                 suggested_implementation="Wrap with `@react-three/fiber` / `@react-three/drei` Canvas for WebGL or HTML5 Canvas with requestAnimationFrame loop.",
@@ -626,15 +676,15 @@ def detect_and_explore_features(
         )
 
     # Kinetic Magnetic Elements
-    magnetic_elements = raw_probe.get("magnetic_elements", [])
+    magnetic_elements = _entries(raw_probe, "magnetic_elements")
     for mag in magnetic_elements:
         features.append(
             SophisticatedFeature(
                 category="magnetic_physics",
                 name=f"Magnetic Cursor Pull Physics ({mag['selector']})",
                 selector=mag["selector"],
-                description=mag["description"],
-                dimensions=mag.get("dimensions", {}),
+                description=_text(mag, "description"),
+                dimensions=_clean_dims(mag.get("dimensions")),
                 requires_independent_exploration=False,
                 exploration_status="explored",
                 suggested_implementation=(
@@ -654,15 +704,15 @@ def detect_and_explore_features(
         )
 
     # Custom Interactive Cursors
-    custom_cursors = raw_probe.get("custom_cursors", [])
+    custom_cursors = _entries(raw_probe, "custom_cursors")
     for cur in custom_cursors:
         features.append(
             SophisticatedFeature(
                 category="custom_cursor",
                 name=f"Custom Interactive Cursor & Floating Preview ({cur['selector']})",
                 selector=cur["selector"],
-                description=cur["description"],
-                dimensions=cur.get("dimensions", {}),
+                description=_text(cur, "description"),
+                dimensions=_clean_dims(cur.get("dimensions")),
                 requires_independent_exploration=False,
                 exploration_status="explored",
                 suggested_implementation=(
@@ -684,15 +734,15 @@ def detect_and_explore_features(
             )
 
     # Typographic SplitText Reveals
-    typographic_reveals = raw_probe.get("typographic_reveals", [])
+    typographic_reveals = _entries(raw_probe, "typographic_reveals")
     for tr in typographic_reveals:
         features.append(
             SophisticatedFeature(
                 category="typographic_reveal",
                 name=f"SplitText Typographic Reveal ({tr['selector']})",
                 selector=tr["selector"],
-                description=tr["description"],
-                dimensions=tr.get("dimensions", {}),
+                description=_text(tr, "description"),
+                dimensions=_clean_dims(tr.get("dimensions")),
                 requires_independent_exploration=False,
                 exploration_status="explored",
                 suggested_implementation=(
@@ -710,15 +760,15 @@ def detect_and_explore_features(
         )
 
     # Dynamic Hover Media Switchers
-    hover_media_switchers = raw_probe.get("hover_media_switchers", [])
+    hover_media_switchers = _entries(raw_probe, "hover_media_switchers", "trigger_selector")
     for hms in hover_media_switchers:
         features.append(
             SophisticatedFeature(
                 category="hover_media_switcher",
                 name=f"Dynamic Hover Media Switcher ({hms['trigger_selector']})",
                 selector=hms["trigger_selector"],
-                description=hms["description"],
-                dimensions=hms.get("dimensions", {}),
+                description=_text(hms, "description"),
+                dimensions=_clean_dims(hms.get("dimensions")),
                 requires_independent_exploration=True,
                 exploration_status="explored" if explore else "detected",
                 suggested_implementation=(
@@ -737,15 +787,15 @@ def detect_and_explore_features(
         )
 
     # Scroll Parallax Tracks
-    scroll_parallaxes = raw_probe.get("scroll_parallaxes", [])
+    scroll_parallaxes = _entries(raw_probe, "scroll_parallaxes")
     for sp in scroll_parallaxes:
         features.append(
             SophisticatedFeature(
                 category="scroll_parallax",
                 name=f"Scroll Parallax Track ({sp['selector']})",
                 selector=sp["selector"],
-                description=sp["description"],
-                dimensions=sp.get("dimensions", {}),
+                description=_text(sp, "description"),
+                dimensions=_clean_dims(sp.get("dimensions")),
                 requires_independent_exploration=False,
                 exploration_status="explored",
                 suggested_implementation=(

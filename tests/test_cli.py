@@ -82,3 +82,42 @@ def test_cli_no_proxy_conflicts(monkeypatch):
     )
     assert result.exit_code == 1
     assert "--no-proxy" in result.stdout
+
+
+@pytest.mark.parametrize("command", ["extract", "crawl"])
+def test_cli_invalid_format_rejected_writes_nothing(monkeypatch, tmp_path, command):
+    _clean(monkeypatch)
+    out = tmp_path / "out"
+    result = runner.invoke(app, [command, "https://example.com", "-f", "bogus", "-o", str(out)])
+    assert result.exit_code != 0
+    assert not out.exists()
+
+
+@pytest.mark.parametrize("alias", ["md", "yml"])
+def test_cli_format_alias_accepted(monkeypatch, tmp_path, alias):
+    from ui_sleuth import cli
+    from ui_sleuth.models import SiteBlueprint
+
+    _clean(monkeypatch)
+    calls = {}
+
+    class FakeEngine:
+        def __init__(self, **kwargs):
+            pass
+
+        def execute(self):
+            return SiteBlueprint.model_construct()
+
+    def fake_export(**kwargs):
+        calls.update(kwargs)
+        return {}
+
+    monkeypatch.setattr(cli, "ScraplingEngine", FakeEngine)
+    monkeypatch.setattr(cli, "export_blueprint", fake_export)
+    result = runner.invoke(
+        app, ["extract", "https://example.com", "-f", alias, "-o", str(tmp_path)]
+    )
+    assert "Invalid value" not in result.output
+    assert calls["export_markdown"] is (alias == "md")
+    assert calls["export_yaml"] is (alias == "yml")
+    assert calls["export_json"] is False

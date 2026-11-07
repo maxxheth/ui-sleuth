@@ -17,6 +17,11 @@ from ui_sleuth.models import (
 
 logger = logging.getLogger(__name__)
 
+# Atomic utility classes (Tailwind-style spacing/colour/dimension) that carry no semantics
+_UTILITY_CLASS_RE = re.compile(
+    r"^(p|m|px|py|pt|pb|pl|pr|w|h|max-w|min-w|text|bg|border|rounded|gap|space)-"
+)
+
 # Elements to completely strip from DOM tree
 STRIP_TAGS: set[str] = {
     "script",
@@ -41,6 +46,9 @@ LANDMARK_TAGS: list[str] = [
     "aside",
     "footer",
 ]
+
+# Landmarks that are never pattern instances (always subsections); <article> may repeat as cards
+_NON_REPEATABLE_LANDMARKS: frozenset[str] = frozenset(LANDMARK_TAGS) - {"article"}
 
 # Tracking keywords in class, id, or src
 TRACKING_PATTERN = re.compile(
@@ -240,9 +248,105 @@ def extract_sample_content(el: HtmlElement) -> dict[str, Any]:
 
 
 def get_element_signature(el: HtmlElement) -> str:
-    """Generate a structural signature string representing an element's direct children."""
-    child_tags = [c.tag.lower() for c in el if isinstance(c.tag, str)]
-    return f"{el.tag.lower()}:[{','.join(child_tags)}]"
+    """Generate a structural signature: the tag plus a depth-2 shape of its children."""
+    parts: list[str] = []
+    for c in el:
+        if not isinstance(c.tag, str):
+            continue
+        grandchildren = [g.tag.lower() for g in c if isinstance(g.tag, str)]
+        parts.append(f"{c.tag.lower()}({','.join(grandchildren)})")
+    return f"{el.tag.lower()}:[{','.join(parts)}]"
+
+
+def _class_tokens(el: HtmlElement) -> list[str]:
+    """Normalized non-utility class tokens of an element, in document order."""
+    seen: dict[str, None] = {}
+    for t in (el.get("class") or "").lower().split():
+        if not _UTILITY_CLASS_RE.match(t):
+            seen.setdefault(t)
+    return list(seen)
+
+
+def _contains_landmark(el: HtmlElement) -> bool:
+    return any(
+        isinstance(d.tag, str) and d.tag.lower() in _NON_REPEATABLE_LANDMARKS
+        for d in el.iterdescendants()
+    )
+
+
+def _split_by_shared_class(group: list[HtmlElement]) -> list[list[HtmlElement]]:
+    """Split same-shape siblings into clusters that share at least one class token.
+
+    Classless ``<li>`` elements are inherently repeated items and cluster together.
+    """
+    tokens = {id(n): _class_tokens(n) for n in group}
+    counts: dict[str, int] = {}
+    for n in group:
+        for t in tokens[id(n)]:
+            counts[t] = counts.get(t, 0) + 1
+
+    clusters: list[list[HtmlElement]] = []
+    assigned: set[int] = set()
+    for token in sorted(counts, key=lambda t: -counts[t]):
+        members = [n for n in group if id(n) not in assigned and token in tokens[id(n)]]
+        if len(members) >= 3:
+            clusters.append(members)
+            assigned.update(id(n) for n in members)
+
+    classless_li = [n for n in group if not tokens[id(n)] and n.tag.lower() == "li"]
+    if len(classless_li) >= 3:
+        clusters.append(classless_li)
+    return clusters
+
+
+def analyze_patterns(
+    container: HtmlElement,
+) -> tuple[list[PatternSchema], list[HtmlElement]]:
+    """Detect repetitive sibling patterns (>= 3 instances) without mutating the tree.
+
+    Returns:
+        (detected_patterns, redundant_nodes_to_drop)
+    """
+    children = [
+        c
+        for c in container
+        if isinstance(c.tag, str) and c.tag.lower() not in _NON_REPEATABLE_LANDMARKS
+    ]
+    if len(children) < 3:
+        return [], []
+
+    signature_groups: dict[str, list[HtmlElement]] = {}
+    for c in children:
+        signature_groups.setdefault(get_element_signature(c), []).append(c)
+
+    detected: list[PatternSchema] = []
+    to_drop: list[HtmlElement] = []
+
+    for sig, group in signature_groups.items():
+        if len(group) < 3:
+            continue
+        for cluster in _split_by_shared_class(group):
+            if any(_contains_landmark(n) for n in cluster):
+                continue
+            first = cluster[0]
+            detected.append(
+                PatternSchema(
+                    pattern=infer_pattern_name(first, sig),
+                    instance_count=len(cluster),
+                    sample_content=extract_sample_content(first),
+                )
+            )
+            to_drop.extend(cluster[1:])
+
+    return detected, to_drop
+
+
+def drop_nodes(nodes: list[HtmlElement]) -> None:
+    """Remove nodes from their parents (no-op for already detached nodes)."""
+    for node in nodes:
+        parent = node.getparent()
+        if parent is not None:
+            parent.remove(node)
 
 
 def detect_and_collapse_patterns(
@@ -250,42 +354,15 @@ def detect_and_collapse_patterns(
 ) -> tuple[list[PatternSchema], list[HtmlElement]]:
     """Scan container children for repetitive sibling patterns (>= 3 instances).
 
+    Redundant instances are removed from the tree after analysis completes.
+
     Returns:
         (detected_patterns, remaining_uncollapsed_children)
     """
-    children = [c for c in container if isinstance(c.tag, str)]
-    if len(children) < 3:
-        return [], children
-
-    # Group consecutive or overall siblings by structural signature
-    signature_groups: dict[str, list[HtmlElement]] = {}
-    for c in children:
-        sig = get_element_signature(c)
-        signature_groups.setdefault(sig, []).append(c)
-
-    detected: list[PatternSchema] = []
-    collapsed_elements: set[HtmlElement] = set()
-
-    for sig, group in signature_groups.items():
-        if len(group) >= 3:
-            first = group[0]
-            pattern_name = infer_pattern_name(first, sig)
-            sample_content = extract_sample_content(first)
-            detected.append(
-                PatternSchema(
-                    pattern=pattern_name,
-                    instance_count=len(group),
-                    sample_content=sample_content,
-                )
-            )
-            # Remove redundant sibling instances from DOM tree after capturing sample
-            for node in group[1:]:
-                parent = node.getparent()
-                if parent is not None:
-                    parent.remove(node)
-            collapsed_elements.update(group)
-
-    remaining = [c for c in container if isinstance(c.tag, str) and c not in collapsed_elements]
+    detected, to_drop = analyze_patterns(container)
+    dropped = set(to_drop)
+    remaining = [c for c in container if isinstance(c.tag, str) and c not in dropped]
+    drop_nodes(to_drop)
     return detected, remaining
 
 
@@ -316,9 +393,7 @@ def clean_classes(cls_str: str | None) -> list[str]:
     semantic: list[str] = []
     for t in tokens:
         # Skip pure Tailwind color/spacing/dimension utilities if long
-        if re.match(
-            r"^(p|m|px|py|pt|pb|pl|pr|w|h|max-w|min-w|text|bg|border|rounded|gap|space)-", t
-        ):
+        if _UTILITY_CLASS_RE.match(t):
             continue
         semantic.append(t)
     return semantic[:5]
@@ -342,24 +417,42 @@ def find_all_patterns_in_element(
     all_patterns: list[PatternSchema] = []
     inferred_layout: str | None = infer_layout_hint(el)
 
+    # Analysis runs on the unmodified tree; removals are applied after traversal.
+    to_drop: list[HtmlElement] = []
+    dropped: set[HtmlElement] = set()
+
+    def is_under_dropped(node: HtmlElement) -> bool:
+        curr = node
+        while curr is not None and curr is not el:
+            if curr in dropped:
+                return True
+            curr = curr.getparent()
+        return False
+
     # 1. Direct children pattern check
-    direct_patterns, _ = detect_and_collapse_patterns(el)
+    direct_patterns, direct_drop = analyze_patterns(el)
     all_patterns.extend(direct_patterns)
+    to_drop.extend(direct_drop)
+    dropped.update(direct_drop)
 
     # 2. Descendant containers (div, ul, ol) that are not inside nested landmarks
-    for descendant in list(el.iter()):
-        if descendant is el:
-            continue
+    for descendant in el.iterdescendants():
         tag = descendant.tag.lower() if isinstance(descendant.tag, str) else ""
         if tag in LANDMARK_TAGS:
             continue
         if is_inside_nested_landmark(descendant, el):
             continue
+        if is_under_dropped(descendant):
+            continue
         if tag in ["div", "ul", "ol"]:
             if inferred_layout is None:
                 inferred_layout = infer_layout_hint(descendant)
-            desc_patterns, _ = detect_and_collapse_patterns(descendant)
+            desc_patterns, desc_drop = analyze_patterns(descendant)
             all_patterns.extend(desc_patterns)
+            to_drop.extend(desc_drop)
+            dropped.update(desc_drop)
+
+    drop_nodes(to_drop)
 
     return all_patterns, inferred_layout
 
@@ -424,6 +517,10 @@ def prune_and_map_dom(html_content: str) -> list[SectionBlueprint]:
     if isinstance(candidate_nodes, list):
         for node in candidate_nodes:
             if not isinstance(node, HtmlElement) or node in visited_nodes:
+                continue
+
+            # Skip nodes collapsed (detached) by an earlier landmark's pattern detection
+            if not any(a is root for a in node.iterancestors()):
                 continue
 
             # Don't add nested landmarks at top level if already inside a parent landmark

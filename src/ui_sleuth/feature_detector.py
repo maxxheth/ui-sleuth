@@ -7,6 +7,7 @@ from typing import Any
 
 from playwright.sync_api import Page
 
+from ui_sleuth.asset_inspector import CANVAS_CONTEXT_HELPER_JS
 from ui_sleuth.models import SophisticatedFeature, SophisticatedFeaturesSummary
 
 logger = logging.getLogger(__name__)
@@ -155,9 +156,17 @@ PROBE_SOPHISTICATED_FEATURES_JS = """
         const style = window.getComputedStyle(el);
         const rect = el.getBoundingClientRect();
         const transform = style.transform || '';
+        // Document coordinates: an element merely above the current viewport is not "offscreen"
+        const docTop = rect.top + window.scrollY;
+        const docBottom = rect.bottom + window.scrollY;
+        const docHeight = Math.max(
+            document.documentElement.scrollHeight,
+            document.body ? document.body.scrollHeight : 0,
+            viewportHeight
+        );
         const isOffscreenTransform = transform.includes('matrix') && (
-            // check if translated outside normal bounds
-            rect.top > viewportHeight * 2 || rect.left > viewportWidth || rect.right < 0 || rect.bottom < -100
+            // translated outside the document bounds
+            docTop > docHeight + viewportHeight || rect.left > viewportWidth || rect.right < 0 || docBottom < -100
         );
         const clsStr = (el.className && typeof el.className === 'string') ? el.className : '';
         const hasOverlayClass = (
@@ -262,18 +271,7 @@ PROBE_SOPHISTICATED_FEATURES_JS = """
     // 6. Dynamic Canvases
     const canvases = document.querySelectorAll('canvas');
     for (const c of canvases) {
-        let gl = false;
-        if (c.__sleuth_context_type__) {
-            gl = c.__sleuth_context_type__.includes('webgl');
-        } else {
-            try {
-                if (c.getContext('2d')) {
-                    gl = false;
-                } else if (c.getContext('webgl2') || c.getContext('webgl') || c.getContext('experimental-webgl')) {
-                    gl = true;
-                }
-            } catch (e) {}
-        }
+        const gl = sleuthCanvasContext(c).is_webgl;
         const r = c.getBoundingClientRect();
         results.canvases.push({
             name: gl ? 'WebGL Shader Canvas' : '2D Dynamic Canvas',
@@ -489,7 +487,7 @@ PROBE_SOPHISTICATED_FEATURES_JS = """
 
     return results;
 }
-"""
+""".replace("() => {", "() => {" + CANVAS_CONTEXT_HELPER_JS, 1)
 
 
 def detect_and_explore_features(

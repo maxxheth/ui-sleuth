@@ -165,3 +165,44 @@ def test_nested_landmarks_in_wrapper_divs():
     assert len(features_sub.detected_patterns) == 1
     assert features_sub.detected_patterns[0].instance_count == 3
     assert features_sub.detected_patterns[0].sample_content["title"] == "Feature 1"
+
+
+def test_distinct_sections_not_collapsed():
+    sec = '<section id="s{i}"><div><h2>Section {i}</h2><p>Distinct copy {i}</p></div></section>'
+    page = (
+        "<html><body><main>" + "".join(sec.format(i=i) for i in range(5)) + "</main></body></html>"
+    )
+    main_lm = next(lm for lm in prune_and_map_dom(page) if lm.landmark == "main")
+    assert [s.id for s in main_lm.subsections] == [f"s{i}" for i in range(5)]
+    assert main_lm.detected_patterns == []
+
+
+def test_nested_lists_in_collapsed_cards_not_rescanned():
+    card = (
+        '<div class="feature-card"><h3>Card {i}</h3><ul><li>a</li><li>b</li><li>c</li></ul></div>'
+    )
+    page = (
+        '<html><body><main><div class="grid">'
+        + "".join(card.format(i=i) for i in range(6))
+        + "</div></main></body></html>"
+    )
+    main_lm = next(lm for lm in prune_and_map_dom(page) if lm.landmark == "main")
+    by_name = [(p.pattern, p.instance_count) for p in main_lm.detected_patterns]
+    assert by_name.count(("FeatureCard", 6)) == 1
+    assert [p for p in by_name if p[0] == "ListItem"] == [("ListItem", 3)]
+
+
+def test_repeated_articles_collapse_into_pattern():
+    card = '<article class="post-card"><h3>Post {i}</h3><p>Excerpt number {i} text.</p></article>'
+    page = (
+        '<html><body><main><div class="posts">'
+        + "".join(card.format(i=i) for i in range(6))
+        + "</div></main></body></html>"
+    )
+    landmarks = prune_and_map_dom(page)
+    assert [lm.landmark for lm in landmarks] == ["main"]
+    main_lm = landmarks[0]
+    assert [(p.pattern, p.instance_count) for p in main_lm.detected_patterns] == [
+        ("ArticleCard", 6)
+    ]
+    assert len([s for s in main_lm.subsections if s.tag_name == "article"]) == 1

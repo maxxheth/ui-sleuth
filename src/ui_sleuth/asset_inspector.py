@@ -21,6 +21,19 @@ PATTERN_MOTION = re.compile(r"\.(riv|lottie)($|\?)", re.IGNORECASE)
 PATTERN_VIDEO = re.compile(r"\.(mp4|webm|m3u8|mpd|mov)($|\?)", re.IGNORECASE)
 PATTERN_LOTTIE_JSON = re.compile(r"\.json($|\?)", re.IGNORECASE)
 
+# Shared, side-effect-free canvas context probe (inlined into other page-evaluated scripts).
+# It must never call getContext(): that would create (and permanently lock) a context on a
+# canvas the page has not initialised yet. The init script in scrapling_engine tags every
+# canvas whose context the page creates; a missing tag therefore means "uninitialized".
+CANVAS_CONTEXT_HELPER_JS = """
+function sleuthCanvasContext(c) {
+    let t = c.__sleuth_context_type__;
+    if (!t) return { context_type: 'uninitialized', is_webgl: false };
+    if (t === 'experimental-webgl') t = 'webgl';
+    return { context_type: t, is_webgl: String(t).includes('webgl') };
+}
+"""
+
 # Client-side JavaScript evaluation for canvas and video diagnostics
 CANVAS_VIDEO_PROBE_JS = """
 () => {
@@ -47,19 +60,7 @@ CANVAS_VIDEO_PROBE_JS = """
     const canvasList = [];
     const canvases = document.querySelectorAll('canvas');
     canvases.forEach((c, idx) => {
-        let contextType = c.__sleuth_context_type__ || 'unknown';
-        // Test context creation or existing context safely
-        if (contextType === 'unknown') {
-            try {
-                if (c.getContext('2d')) {
-                    contextType = '2d';
-                } else if (c.getContext('webgl2')) {
-                    contextType = 'webgl2';
-                } else if (c.getContext('webgl') || c.getContext('experimental-webgl')) {
-                    contextType = 'webgl';
-                }
-            } catch (e) {}
-        }
+        const contextType = sleuthCanvasContext(c).context_type;
 
         canvasList.push({
             index: idx,
@@ -113,7 +114,7 @@ CANVAS_VIDEO_PROBE_JS = """
         videos: videoList
     };
 }
-"""
+""".replace("() => {", "() => {" + CANVAS_CONTEXT_HELPER_JS, 1)
 
 
 class NetworkAssetCollector:
@@ -282,7 +283,7 @@ def synthesize_production_assets(
     # 3. Canvas nodes with WebGL/2D without direct network files (e.g. procedural shaders or PixiJS)
     if canvases and not network_collector.assets_3d and not network_collector.assets_motion:
         for c in canvases:
-            ctx_type = c.get("context_type", "2d")
+            ctx_type = c.get("context_type", "uninitialized")
             engines = list(window_engines)
             if ctx_type in ["webgl", "webgl2"] and not engines:
                 engines.append("Custom WebGL Shader / Three.js")

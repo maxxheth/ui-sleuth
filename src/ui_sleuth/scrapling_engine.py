@@ -48,9 +48,40 @@ def is_chrome_installed() -> bool:
     return bool(shutil.which("google-chrome") or shutil.which("chromium") or shutil.which("chrome"))
 
 
+# Init script that tags every canvas with the context type the page created (non-destructive)
+CANVAS_INIT_SCRIPT = """
+(() => {
+    try {
+        const origGetContext = HTMLCanvasElement.prototype.getContext;
+        HTMLCanvasElement.prototype.getContext = function(type, ...args) {
+            const ctx = origGetContext.call(this, type, ...args);
+            if (ctx && !this.__sleuth_context_type__) {
+                this.__sleuth_context_type__ = type;
+            }
+            return ctx;
+        };
+        const origOffscreen = HTMLCanvasElement.prototype.transferControlToOffscreen;
+        if (origOffscreen) {
+            HTMLCanvasElement.prototype.transferControlToOffscreen = function(...args) {
+                const off = origOffscreen.apply(this, args);
+                if (!this.__sleuth_context_type__) {
+                    this.__sleuth_context_type__ = 'offscreen';
+                }
+                return off;
+            };
+        }
+    } catch (e) {}
+})();
+"""
+
+
 # Client-side JavaScript routine to force hydration of lazy images, scroll triggers, and web fonts
 HYDRATE_PAGE_JS = """
-async () => {
+async ({ maxMs = 15000, maxSteps = 80, maxHeight = 40000 } = {}) => {
+    const deadline = performance.now() + maxMs;
+    const left = () => Math.max(0, deadline - performance.now());
+    const withTimeout = (p, ms) => Promise.race([p, new Promise(r => setTimeout(r, ms))]);
+
     // 1. Force eager loading and restore data-src on all images
     document.querySelectorAll('img').forEach(img => {
         if (img.loading === 'lazy') img.loading = 'eager';
@@ -70,8 +101,9 @@ async () => {
     const step = Math.max(Math.floor(viewportHeight * 0.75), 500);
     let currentY = 0;
     let maxScroll = getScrollHeight();
+    let steps = 0;
 
-    while (currentY < maxScroll) {
+    while (currentY < Math.min(maxScroll, maxHeight) && steps++ < maxSteps && left() > 0) {
         currentY = Math.min(currentY + step, maxScroll);
         window.scrollTo(0, currentY);
         if (window.ScrollTrigger) window.ScrollTrigger.update();
@@ -93,18 +125,28 @@ async () => {
         } catch (e) {}
     }
 
-    // 4. Force image decoding
+    // 4. Force image decoding (bounded: stalled requests must not hang hydration)
     const imgs = Array.from(document.querySelectorAll('img'));
-    await Promise.all(
-        imgs.map(img => (img.decode ? img.decode().catch(() => {}) : Promise.resolve()))
+    await withTimeout(
+        Promise.all(
+            imgs.map(img => (img.decode ? img.decode().catch(() => {}) : Promise.resolve()))
+        ),
+        Math.min(left(), 5000)
     );
 
-    // 5. Ensure web fonts are completely ready
+    // 5. Ensure web fonts are ready (bounded)
     if (document.fonts && document.fonts.ready) {
-        try { await document.fonts.ready; } catch (e) {}
+        try { await withTimeout(document.fonts.ready, 3000); } catch (e) {}
     }
 
-    // 6. Dispatch synthetic scroll and resize events
+    // 6. Return to the top so later probes and the screenshot see the page at rest
+    window.scrollTo(0, 0);
+    try { window.lenis?.scrollTo?.(0, { immediate: true }); } catch (e) {}
+    try { window.ScrollTrigger?.update?.(); } catch (e) {}
+    // rAF never fires in occluded/background windows, so bound the wait
+    await withTimeout(new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r))), 200);
+
+    // 7. Dispatch synthetic scroll and resize events
     window.dispatchEvent(new Event('scroll'));
     window.dispatchEvent(new Event('resize'));
 }
@@ -159,19 +201,7 @@ class ScraplingEngine:
 
             # Intercept canvas getContext to track active context type non-destructively
             try:
-                page.add_init_script("""
-                (() => {
-                    try {
-                        const origGetContext = HTMLCanvasElement.prototype.getContext;
-                        HTMLCanvasElement.prototype.getContext = function(type, ...args) {
-                            if (!this.__sleuth_context_type__) {
-                                this.__sleuth_context_type__ = type;
-                            }
-                            return origGetContext.call(this, type, ...args);
-                        };
-                    } catch (e) {}
-                })();
-                """)
+                page.add_init_script(CANVAS_INIT_SCRIPT)
             except Exception as e:
                 logger.debug("Could not attach canvas init script: %s", e)
 
@@ -194,7 +224,7 @@ class ScraplingEngine:
             if self.auto_scroll:
                 try:
                     logger.debug("Executing progressive auto-scroll page hydration...")
-                    page.evaluate(HYDRATE_PAGE_JS)
+                    page.evaluate(HYDRATE_PAGE_JS, {"maxMs": min(self.timeout_ms // 2, 15000)})
                 except Exception as e:
                     logger.debug("Page hydration evaluation encountered error: %s", e)
 

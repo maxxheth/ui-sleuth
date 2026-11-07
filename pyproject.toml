@@ -54,6 +54,9 @@ reportUnknownParameterType = false
 reportUnknownArgumentType = false
 
 [tool.pytest.ini_options]
+markers = [
+    "browser: tests that launch bundled Playwright Chromium (no network); skipped if unavailable",
+]
 filterwarnings = [
     "ignore:The 'strip_cdata' option of HTMLParser\\(\\) has never done anything:DeprecationWarning:lxml\\.html",
 ]

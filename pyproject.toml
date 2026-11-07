@@ -45,6 +45,8 @@ line-ending = "lf"
 
 [tool.pyright]
 include = ["src"]
+venvPath = "."
+venv = ".venv"
 typeCheckingMode = "strict"
 pythonVersion = "3.11"
 reportMissingTypeStubs = false

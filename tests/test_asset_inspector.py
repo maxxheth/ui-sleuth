@@ -133,3 +133,12 @@ def test_rive_with_query_string_uses_rive_wrapper():
     assets = synthesize_production_assets(collector, {})
     motion = next(a for a in assets if a.category != "rich_video" and "Rive" in a.detected_engines)
     assert "rive" in motion.suggested_react_wrapper.lower()
+
+
+def test_unknown_3d_asset_is_not_labeled_three_js():
+    collector = NetworkAssetCollector()
+    collector.assets_3d = ["https://cdn.example.com/model.glb"]
+    assets = synthesize_production_assets(collector, {"detected_window_engines": []})
+    model = next(a for a in assets if a.category == "3d_model")
+    assert "Three.js" not in model.detected_engines
+    assert model.detected_engines == ["3D model (engine not identified)"]

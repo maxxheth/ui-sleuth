@@ -3,23 +3,24 @@
 from __future__ import annotations
 
 import logging
+import re
 from enum import StrEnum
 from pathlib import Path
 from typing import Annotated
+from urllib.parse import urlparse
 
 import typer
-from dotenv import load_dotenv
+from dotenv import find_dotenv, load_dotenv
 from rich.console import Console
 from rich.markup import escape
 from rich.panel import Panel
 from rich.table import Table
 
+from ui_sleuth._version import __version__
 from ui_sleuth.crawler import SiteCrawler
 from ui_sleuth.exporter import export_blueprint, export_site_design_system
 from ui_sleuth.proxy_manager import ProxyConfig, ProxyConfigError, resolve_proxy_config
 from ui_sleuth.scrapling_engine import ScraplingEngine
-
-load_dotenv()
 
 app = typer.Typer(
     name="ui-sleuth",
@@ -29,6 +30,48 @@ app = typer.Typer(
 )
 
 console = Console()
+
+
+@app.callback()
+def app_callback() -> None:
+    """Load a ./.env (searched from the working directory) once per CLI invocation."""
+    load_dotenv(find_dotenv(usecwd=True))
+
+
+def _default_output_dir(target_url: str) -> Path:
+    """Return output/<host>/ (without a leading www., sanitized) for a target URL."""
+    host = (urlparse(target_url).hostname or "").lower().removeprefix("www.")
+    host = re.sub(r"[^a-z0-9.-]+", "-", host).strip(".-")
+    return Path("output") / (host or "site")
+
+
+_FORMAT_ARTIFACTS: dict[str, tuple[str, ...]] = {
+    "json": ("blueprint.json", "site_design_system.json", "manifest.json"),
+    "markdown": ("blueprint.md", "site_design_system.md"),
+    "yaml": ("blueprint.yaml", "site_design_system.yaml"),
+}
+
+
+def _warn_stale_artifacts(output: Path, do_json: bool, do_md: bool, do_yaml: bool) -> None:
+    """Warn about artifacts of formats not requested this run that exist from earlier runs."""
+    skipped = [
+        key
+        for key, wanted in (("json", do_json), ("markdown", do_md), ("yaml", do_yaml))
+        if not wanted
+    ]
+    stale = [
+        output / name
+        for key in skipped
+        for name in _FORMAT_ARTIFACTS[key]
+        if (output / name).exists()
+    ]
+    if stale:
+        console.print(
+            "[yellow]Warning:[/yellow] stale artifacts from earlier runs remain in "
+            f"{escape(str(output))} (not updated this run, not deleted):"
+        )
+        for path in stale:
+            console.print(f"  - {escape(str(path))}")
 
 
 class OutputFormat(StrEnum):
@@ -157,6 +200,7 @@ def _execute_multi_page_crawl(
         raise typer.Exit(code=1)
 
     do_json, do_md, do_yaml = _format_flags(fmt)
+    _warn_stale_artifacts(output, do_json, do_md, do_yaml)
 
     saved = export_site_design_system(
         crawl_result=crawl_result,
@@ -234,9 +278,13 @@ def extract(
         typer.Option("--url", "-u", help="Target URL (alternative to positional argument)"),
     ] = None,
     output: Annotated[
-        Path,
-        typer.Option("--output", "-o", help="Output directory for generated blueprints"),
-    ] = Path("./output"),
+        Path | None,
+        typer.Option(
+            "--output",
+            "-o",
+            help="Output directory for generated blueprints [default: output/<host>]",
+        ),
+    ] = None,
     screenshot: Annotated[
         bool,
         typer.Option(
@@ -375,6 +423,9 @@ def extract(
     if not target_url.startswith(("http://", "https://")):
         target_url = f"https://{target_url}"
 
+    if output is None:
+        output = _default_output_dir(target_url)
+
     proxy_cfg = _resolve_proxy_or_exit(
         proxy=proxy,
         proxy_file=proxy_file,
@@ -411,7 +462,7 @@ def extract(
 
     console.print(
         Panel.fit(
-            f"[bold cyan]ui-sleuth[/bold cyan] [green]v0.1.0[/green]\n"
+            f"[bold cyan]ui-sleuth[/bold cyan] [green]v{__version__}[/green]\n"
             f"Target: [bold]{target_url}[/bold]\n"
             f"Output: [yellow]{output}[/yellow]\n"
             f"Wait condition: [magenta]{wait_until}[/magenta] | Viewport: [blue]{viewport}[/blue]",
@@ -455,6 +506,7 @@ def extract(
 
     # 4. Export blueprint artifacts
     do_json, do_md, do_yaml = _format_flags(fmt)
+    _warn_stale_artifacts(output, do_json, do_md, do_yaml)
 
     saved = export_blueprint(
         blueprint=blueprint,
@@ -512,9 +564,13 @@ def crawl(
         typer.Option("--url", "-u", help="Target URL (alternative to positional argument)"),
     ] = None,
     output: Annotated[
-        Path,
-        typer.Option("--output", "-o", help="Output directory for generated blueprints"),
-    ] = Path("./output"),
+        Path | None,
+        typer.Option(
+            "--output",
+            "-o",
+            help="Output directory for generated blueprints [default: output/<host>]",
+        ),
+    ] = None,
     max_pages: Annotated[
         int,
         typer.Option(
@@ -646,6 +702,9 @@ def crawl(
     if not target_url.startswith(("http://", "https://")):
         target_url = f"https://{target_url}"
 
+    if output is None:
+        output = _default_output_dir(target_url)
+
     proxy_cfg = _resolve_proxy_or_exit(
         proxy=proxy,
         proxy_file=proxy_file,
@@ -678,7 +737,7 @@ def crawl(
 @app.command()
 def version() -> None:
     """Show the ui-sleuth version."""
-    console.print("[bold cyan]ui-sleuth[/bold cyan] version [green]0.1.0[/green]")
+    console.print(f"[bold cyan]ui-sleuth[/bold cyan] version [green]{__version__}[/green]")
 
 
 def main() -> None:

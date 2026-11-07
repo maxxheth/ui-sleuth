@@ -1,5 +1,7 @@
 """Tests for CLI interface."""
 
+from pathlib import Path
+
 import pytest
 from typer.testing import CliRunner
 
@@ -17,7 +19,9 @@ def test_cli_help():
 def test_cli_version():
     result = runner.invoke(app, ["version"])
     assert result.exit_code == 0
-    assert "0.1.0" in result.stdout
+    from ui_sleuth import __version__
+
+    assert __version__ in result.stdout
 
 
 def test_cli_missing_url():
@@ -121,3 +125,54 @@ def test_cli_format_alias_accepted(monkeypatch, tmp_path, alias):
     assert calls["export_markdown"] is (alias == "md")
     assert calls["export_yaml"] is (alias == "yml")
     assert calls["export_json"] is False
+
+
+def test_default_output_dir_uses_host():
+    from ui_sleuth.cli import _default_output_dir
+
+    assert _default_output_dir("https://www.Example.com/a?b=1") == Path("output/example.com")
+    assert _default_output_dir("http://localhost:8000/") == Path("output/localhost")
+
+
+def test_extract_without_output_uses_host_dir(monkeypatch):
+    from ui_sleuth import cli
+    from ui_sleuth.models import SiteBlueprint
+
+    _clean(monkeypatch)
+    calls = {}
+
+    class FakeEngine:
+        def __init__(self, **kwargs):
+            pass
+
+        def execute(self):
+            return SiteBlueprint.model_construct()
+
+    monkeypatch.setattr(cli, "ScraplingEngine", FakeEngine)
+    monkeypatch.setattr(cli, "export_blueprint", lambda **kw: calls.update(kw) or {})
+    runner.invoke(app, ["extract", "https://www.example.com/x"])
+    assert calls["output_dir"] == Path("output/example.com")
+
+
+def test_stale_artifact_warning_lists_other_formats(tmp_path, capsys):
+    from ui_sleuth.cli import _warn_stale_artifacts
+
+    (tmp_path / "blueprint.md").write_text("old")
+    _warn_stale_artifacts(tmp_path, True, False, False)
+    out = capsys.readouterr().out
+    assert "blueprint.md" in out
+    assert (tmp_path / "blueprint.md").exists()
+    _warn_stale_artifacts(tmp_path, True, True, True)
+    assert capsys.readouterr().out == ""
+
+
+def test_import_does_not_touch_environ(tmp_path):
+    import subprocess
+    import sys
+
+    (tmp_path / ".env").write_text("UI_SLEUTH_PROBE=1\n")
+    code = "import os, ui_sleuth, sys; assert 'ui_sleuth.cli' not in sys.modules; print(os.environ.get('UI_SLEUTH_PROBE'))"
+    result = subprocess.run(
+        [sys.executable, "-c", code], cwd=tmp_path, capture_output=True, text=True, check=True
+    )
+    assert result.stdout.strip() == "None"

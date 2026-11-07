@@ -10,7 +10,9 @@ from pydantic import BaseModel, Field
 class ColorToken(BaseModel):
     """Normalized color token extracted from DOM computed styles."""
 
-    hex: str = Field(description="Normalized 6-digit hex color code (#rrggbb)")
+    hex: str = Field(
+        description="Normalized lowercase hex color: #rrggbb, or #rrggbbaa when the source color is translucent"
+    )
     rgb: str = Field(description="Normalized rgb/rgba string")
     role: Literal["background", "surface", "text", "accent", "border", "unknown"] = Field(
         default="unknown",

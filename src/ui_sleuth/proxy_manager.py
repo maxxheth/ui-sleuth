@@ -9,10 +9,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
-from dotenv import load_dotenv
 from scrapling.engines.toolbelt.proxy_rotation import ProxyRotator
-
-load_dotenv()
 
 logger = logging.getLogger(__name__)
 

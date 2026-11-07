@@ -924,11 +924,6 @@ def export_site_design_system(
         json_file.write_text(json_content, encoding="utf-8")
         saved_paths["design_system_json"] = json_file
 
-        # Convenience alias blueprint.json
-        bp_json = out_path / "blueprint.json"
-        bp_json.write_text(json_content, encoding="utf-8")
-        saved_paths["blueprint_json"] = bp_json
-
         # manifest.json
         manifest_file = out_path / "manifest.json"
         manifest_data = {
@@ -949,11 +944,6 @@ def export_site_design_system(
         md_file.write_text(md_content, encoding="utf-8")
         saved_paths["design_system_markdown"] = md_file
 
-        # Convenience alias blueprint.md
-        bp_md = out_path / "blueprint.md"
-        bp_md.write_text(md_content, encoding="utf-8")
-        saved_paths["blueprint_markdown"] = bp_md
-
     # 3. site_design_system.yaml
     if export_yaml:
         yaml_file = out_path / "site_design_system.yaml"
@@ -961,11 +951,6 @@ def export_site_design_system(
         yaml_content = yaml.dump(ds_data, sort_keys=False, allow_unicode=True)
         yaml_file.write_text(yaml_content, encoding="utf-8")
         saved_paths["design_system_yaml"] = yaml_file
-
-        # Convenience alias blueprint.yaml
-        bp_yaml = out_path / "blueprint.yaml"
-        bp_yaml.write_text(yaml_content, encoding="utf-8")
-        saved_paths["blueprint_yaml"] = bp_yaml
 
     # 4. Individual per-page blueprints in output_dir / "pages" / <slug>
     for page_url, bp in crawl_result.pages.items():

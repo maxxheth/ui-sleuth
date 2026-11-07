@@ -59,13 +59,14 @@
    - `blueprint.json`: Validated against strict Pydantic schemas.
    - `blueprint.md`: LLM-ready context block with embedded vibe-coding instructions, ready to copy-paste directly into Claude, GPT-4, or Gemini.
    - `blueprint.yaml`: Ultra-dense YAML representation for minimal token consumption.
+   - **Output location**: without `-o`, artifacts go to `output/<host>/` (host without `www.`), so sites and runs do not overwrite each other. Files of formats not requested in the current run (e.g. an older `.md` after `-f json`) are never deleted, but a warning lists them.
 
 8. **Multi-Page Site Crawl & Component System Synthesis (`crawler.py`)**
    - **Internal Route Discovery**: Explores internal links with intelligent architectural prioritization (nav and header links to `/pricing`, `/features`, `/about`, `/docs` over deep pagination).
    - **Cross-Page Design Tokens**: Synthesizes global color palettes with frequency analysis, typography hierarchies, and root CSS custom variables across all crawled pages.
    - **Component System Catalog**: Inters and synthesizes global layout shells (`GlobalNavbar`, `GlobalFooter`) and reusable modular components (`FeatureCard`, `PricingCard`, `AccordionFAQ`) with inferred TypeScript props interfaces and concrete sample content.
    - **Site-Wide Motion & Asset Manifest**: Deduplicates motion runtimes (GSAP, Lenis, Three.js, Lottie), sticky scroll tracks, offscreen drawers, and external 3D/video assets.
-   - **Multi-Page Artifacts**: Generates `site_design_system.json`, `site_design_system.yaml`, `site_design_system.md`, `manifest.json`, and per-page detailed blueprints in `pages/<slug>/`.
+   - **Multi-Page Artifacts**: Generates `site_design_system.json`, `site_design_system.yaml`, `site_design_system.md`, `manifest.json`, and per-page detailed blueprints in `pages/<slug>/`. (The old top-level `blueprint.*` aliases that duplicated the design system were removed; `blueprint.*` now only means a single page's blueprint.)
 
 ---
 
@@ -84,14 +85,14 @@ uv sync
 
 ### Basic Extraction (Single Page)
 ```bash
-uv run ui-sleuth extract https://example.com --output ./output --screenshot
+uv run ui-sleuth extract https://example.com --output ./output/example.com --screenshot
 ```
 
 ### Multi-Page Crawl & Design System Synthesis
 Crawl multiple pages to synthesize a unified component system and global design tokens:
 ```bash
 # Dedicated crawl command
-uv run ui-sleuth crawl https://example.com --max-pages 5 --max-depth 2 --output ./output --screenshot
+uv run ui-sleuth crawl https://example.com --max-pages 5 --max-depth 2 --output ./output/example.com --screenshot
 
 # Or via extract with --crawl
 uv run ui-sleuth extract https://example.com --crawl --max-pages 5 --screenshot
@@ -100,7 +101,7 @@ uv run ui-sleuth extract https://example.com --crawl --max-pages 5 --screenshot
 ### Using Wait Conditions & Viewport
 ```bash
 uv run ui-sleuth extract https://example.com \
-  --output ./output \
+  --output ./output/example.com \
   --wait-until networkidle \
   --timeout 30 \
   --viewport 1920x1080 \
@@ -157,7 +158,7 @@ Usage: ui-sleuth extract [OPTIONS] [url]
 
 Options:
   -u, --url <str>               Target URL (alternative to positional argument)
-  -o, --output <path>           Output directory for generated blueprints [default: output]
+  -o, --output <path>           Output directory for generated blueprints [default: output/<host>]
   -s, --screenshot              Capture a full-page screenshot alongside the blueprint
       --wait-until <str>        Wait condition: 'networkidle', 'load', or CSS selector [default: networkidle]
   -t, --timeout <int>           Timeout in seconds [default: 30]
@@ -187,7 +188,7 @@ Usage: ui-sleuth crawl [OPTIONS] [url]
 
 Options:
   -u, --url <str>               Target URL (alternative to positional argument)
-  -o, --output <path>           Output directory for generated blueprints [default: output]
+  -o, --output <path>           Output directory for generated blueprints [default: output/<host>]
   -m, --max-pages <int>         Maximum number of pages to crawl across the site [default: 5]
       --max-depth <int>         Maximum crawl link depth for internal link discovery [default: 2]
   -s, --screenshot              Capture full-page screenshots alongside blueprints

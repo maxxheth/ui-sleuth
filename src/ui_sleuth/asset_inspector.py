@@ -127,7 +127,6 @@ class NetworkAssetCollector:
         self.assets_bin: list[str] = []
         self.assets_motion: list[str] = []
         self.assets_video: list[str] = []
-        self.all_responses: list[dict[str, Any]] = []
 
     def handle_response(self, response: PlaywrightResponse) -> None:
         """Playwright response event listener."""
@@ -139,14 +138,6 @@ class NetworkAssetCollector:
 
             headers = response.headers
             content_type = headers.get("content-type", "").lower()
-
-            self.all_responses.append(
-                {
-                    "url": url,
-                    "status": status,
-                    "content_type": content_type,
-                }
-            )
 
             # Candidate glTF buffers; only counted when a .gltf is also loaded (see below)
             if PATTERN_BIN.search(url):
@@ -224,7 +215,7 @@ def synthesize_production_assets(
     models = resolve_3d_assets(network_collector)
     if models:
         has_spline = any("splinecode" in u for u in models) or "Spline" in window_engines
-        has_three = "Three.js" in window_engines or not has_spline
+        has_three = "Three.js" in window_engines
 
         engines: list[str] = []
         if has_spline:
@@ -234,7 +225,7 @@ def synthesize_production_assets(
         if "Babylon.js" in window_engines:
             engines.append("Babylon.js")
         if not engines:
-            engines.append("Three.js (Standard WebGL GLTF Loader)")
+            engines.append("3D model (engine not identified)")
 
         suggested_wrapper = (
             "@splinetool/react-spline"

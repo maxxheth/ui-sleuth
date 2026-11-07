@@ -19,6 +19,7 @@ from rich.table import Table
 from ui_sleuth._version import __version__
 from ui_sleuth.crawler import SiteCrawler
 from ui_sleuth.exporter import export_blueprint, export_site_design_system
+from ui_sleuth.log_redaction import install_scrapling_log_redaction
 from ui_sleuth.proxy_manager import ProxyConfig, ProxyConfigError, resolve_proxy_config
 from ui_sleuth.scrapling_engine import ScraplingEngine
 
@@ -102,6 +103,7 @@ def setup_logging(verbose: bool = False) -> None:
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
         datefmt="%H:%M:%S",
     )
+    install_scrapling_log_redaction()
 
 
 _PROXY_PARAMS = ("proxy", "proxy_file", "decodo", "proxy_env", "no_proxy")

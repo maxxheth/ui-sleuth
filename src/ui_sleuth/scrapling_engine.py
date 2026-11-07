@@ -23,6 +23,7 @@ from ui_sleuth.asset_inspector import (
 )
 from ui_sleuth.dom_pruner import prune_and_map_dom
 from ui_sleuth.feature_detector import detect_and_explore_features
+from ui_sleuth.log_redaction import install_scrapling_log_redaction
 from ui_sleuth.models import (
     DesignTokens,
     SiteBlueprint,
@@ -199,6 +200,7 @@ def browser_session(
     session; per-page options (wait condition, hooks, timeout) are passed to ``fetch``.
     The session is always closed on exit, including when the body raises.
     """
+    install_scrapling_log_redaction()
     proxy_config = proxy_config or ProxyConfig()
     resolved_chrome = is_chrome_installed() if real_chrome is None else real_chrome
     session_kwargs: dict[str, Any] = {
@@ -236,6 +238,7 @@ class ScraplingEngine:
         explore_features: bool = True,
         session: Any | None = None,
     ) -> None:
+        install_scrapling_log_redaction()
         # Optional shared browser session (see browser_session); None opens a one-off browser
         self.session = session
         self.final_url: str | None = None
